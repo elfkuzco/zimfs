@@ -10,10 +10,23 @@ import (
 	"github.com/edsrzf/mmap-go"
 )
 
+func ReadUint16(data []byte, offset uint64) uint16 {
+	return binary.LittleEndian.Uint16(data[offset : offset+2])
+}
+
+func ReadUint32(data []byte, offset uint64) uint32 {
+	return binary.LittleEndian.Uint32(data[offset : offset+4])
+}
+
+func ReadUint64(data []byte, offset uint64) uint64 {
+	return binary.LittleEndian.Uint64(data[offset : offset+8])
+}
+
 type ZimFile struct {
 	*Header
 	contents mmap.MMap
 	fh       *os.File
+	clusters []ClusterReader
 }
 
 var (
@@ -36,6 +49,7 @@ func NewZimFile(f *os.File) (*ZimFile, error) {
 		header,
 		contents,
 		f,
+		make([]ClusterReader, header.ClusterCount),
 	}, nil
 }
 
@@ -43,18 +57,6 @@ func NewZimFile(f *os.File) (*ZimFile, error) {
 func (zf *ZimFile) Close() error {
 	defer zf.fh.Close()
 	return zf.contents.Unmap()
-}
-
-func (zf *ZimFile) readUint16(offset uint64) uint16 {
-	return binary.LittleEndian.Uint16(zf.contents[offset : offset+2])
-}
-
-func (zf *ZimFile) readUint32(offset uint64) uint32 {
-	return binary.LittleEndian.Uint32(zf.contents[offset : offset+4])
-}
-
-func (zf *ZimFile) readUint64(offset uint64) uint64 {
-	return binary.LittleEndian.Uint64(zf.contents[offset : offset+8])
 }
 
 // Get the first entry whose path is less than or equal to path in the same
@@ -113,8 +115,8 @@ func (zf *ZimFile) getZimEntry(index uint32) (ZimEntry, error) {
 		return nil, EntryDoesNotExist
 	}
 	pathList := zf.contents[zf.PathPtrPos : zf.PathPtrPos+uint64(zf.EntryCount)*8]
-	offset := binary.LittleEndian.Uint64(pathList[index*8:])
-	mimeType := zf.readUint16(offset)
+	offset := ReadUint64(pathList, uint64(index*8))
+	mimeType := ReadUint16(zf.contents, offset)
 
 	if IsDeletedEntry(mimeType) || IsLinkTargetEntry(mimeType) {
 		return nil, EntryDoesNotExist
@@ -122,7 +124,7 @@ func (zf *ZimFile) getZimEntry(index uint32) (ZimEntry, error) {
 
 	paramLen := zf.contents[offset+2]
 	ns := zf.contents[offset+3]
-	revision := zf.readUint32(offset + 4)
+	revision := ReadUint32(zf.contents, offset+4)
 	if IsRedirectEntry(mimeType) {
 		return &RedirectEntry{
 			Entry{
@@ -132,7 +134,7 @@ func (zf *ZimFile) getZimEntry(index uint32) (ZimEntry, error) {
 				revision,
 				zf.getPathName(offset + 12),
 			},
-			zf.readUint32(offset + 8),
+			ReadUint32(zf.contents, offset+8),
 		}, nil
 	}
 	return &ContentEntry{
@@ -143,8 +145,8 @@ func (zf *ZimFile) getZimEntry(index uint32) (ZimEntry, error) {
 			revision,
 			zf.getPathName(offset + 16),
 		},
-		zf.readUint32(offset + 8),
-		zf.readUint32(offset + 12),
+		ReadUint32(zf.contents, offset+8),
+		ReadUint32(zf.contents, offset+12),
 	}, nil
 }
 
@@ -172,4 +174,18 @@ func (zf *ZimFile) GetZimEntryFromStart(start uint32, namespace rune, path strin
 		}
 	}
 	return nil, EntryDoesNotExist
+}
+
+// Get or create cluster for entry
+func (zf *ZimFile) GetOrCreateCluster(entry *ContentEntry) (ClusterReader, error) {
+	if zf.clusters[entry.ClusterNumber] == nil {
+		clusterList := zf.contents[zf.ClusterPtrPos : zf.ClusterPtrPos+uint64(zf.ClusterCount)*8]
+		start := ReadUint64(clusterList, uint64(entry.ClusterNumber*8))
+		cluster, err := NewCluster(zf.contents[start:])
+		if err != nil {
+			return nil, err
+		}
+		zf.clusters[entry.ClusterNumber] = cluster
+	}
+	return zf.clusters[entry.ClusterNumber], nil
 }

@@ -89,6 +89,7 @@ func (fs *ZimFS) getMode(entry *zim.Entry) os.FileMode {
 	}
 }
 
+// Guarded_by(fs.mu)
 func (fs *ZimFS) createInodeAttributes(zimEntry zim.ZimEntry) fuseops.InodeAttributes {
 	now := time.Now()
 	entry := zimEntry.Get()
@@ -99,11 +100,21 @@ func (fs *ZimFS) createInodeAttributes(zimEntry zim.ZimEntry) fuseops.InodeAttri
 		Ctime:  now,
 		Crtime: now,
 	}
-	if entry.IsDirectoryEntry() {
+	switch entry := zimEntry.(type) {
+	case *zim.DirectoryEntry:
 		attrs.Nlink = 2
 		attrs.Size = 4096
-	} else {
+	case *zim.ContentEntry:
 		attrs.Nlink = 1
+		cluster, err := fs.zf.GetOrCreateCluster(entry)
+		if err != nil {
+			fs.logger.Error("unable to get cluster for entry %s: %v", entry.Path, err)
+			return attrs
+		}
+		attrs.Size = cluster.GetBlobSize(entry.BlobNumber)
+	default:
+		attrs.Nlink = 1
+		attrs.Size = 4096
 	}
 	return attrs
 }
