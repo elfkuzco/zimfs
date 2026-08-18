@@ -9,5 +9,6 @@ require (
 
 require (
 	github.com/edsrzf/mmap-go v1.2.0 // indirect
+	github.com/klauspost/compress v1.19.2 // indirect
 	golang.org/x/sys v0.47.0 // indirect
 )

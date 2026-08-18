@@ -111,7 +111,11 @@ func (fs *ZimFS) createInodeAttributes(zimEntry zim.ZimEntry) fuseops.InodeAttri
 			fs.logger.Error("unable to get cluster for entry %s: %v", entry.Path, err)
 			return attrs
 		}
-		attrs.Size = cluster.GetBlobSize(entry.BlobNumber)
+		size, err := cluster.GetBlobSize(entry.BlobNumber)
+		if err != nil {
+			fs.logger.Error("unable to retrieve size for entry %s  from cluster: %v", entry.Path, err)
+		}
+		attrs.Size = size
 	default:
 		attrs.Nlink = 1
 		attrs.Size = 4096
