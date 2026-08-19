@@ -44,14 +44,18 @@ func NewZimFS(f *os.File) (*fuse.Server, error) {
 	}
 	fs.nextInodeID.Store(uint64(fuseops.RootInodeID))
 
-	// Set up the root inode.
-	rootAttrs := fuseops.InodeAttributes{
-		Mode: 0500 | os.ModeDir,
-		Size: 4096,
+	// The root's first child is the first entry in the content namespace, which
+	// is not necessarily index 0 if other namespaces sort before it.
+	startIndex, err := zf.FirstIndexInNamespace('C')
+	if err != nil {
+		zf.Close()
+		return nil, err
 	}
 
-	rootEntry := zim.NewDirectoryEntry('C', "", 0)
-	rootInode := newInode(fuseops.RootInodeID, rootAttrs, rootEntry)
+	rootEntry := zim.NewDirectoryEntry('C', "", startIndex)
+	rootInode := newInode(fuseops.RootInodeID, rootEntry)
+	rootInode.attributes = fs.createInodeAttributes(rootEntry)
+	rootInode.materialized = true
 	fs.cache.addInode(rootInode)
 
 	server := fuseutil.NewFileSystemServer(fs)
@@ -62,17 +66,22 @@ func (fs *ZimFS) allocateInodeId() fuseops.InodeID {
 	return fuseops.InodeID(fs.nextInodeID.Add(1))
 }
 
-func (fs *ZimFS) getOrCreateInode(child zim.ZimEntry) *inode {
+func (fs *ZimFS) getOrCreateInode(child zim.ZimEntry, lookup bool) *inode {
 	entry := child.Get()
 
-	if id, ok := fs.cache.getInodeIdByNsPath(entry.Namespace, entry.Path); ok {
-		if inode, ok := fs.cache.getInodeById(id); ok {
-			return inode
-		}
+	if inode, ok := fs.cache.getInodeByNsPath(entry.Namespace, entry.Path, lookup); ok {
+		return inode
 	}
 
-	attrs := fs.createInodeAttributes(child)
-	return fs.cache.getOrAddInode(entry.Namespace, entry.Path, attrs, child, fs.allocateInodeId)
+	return fs.cache.getOrAddInode(entry.Namespace, entry.Path, child, fs.allocateInodeId, lookup)
+}
+
+// materializeInode returns the inode's attributes, computing them lazily (and
+// possibly decompressing cluster data) on first access.
+func (fs *ZimFS) materializeInode(id fuseops.InodeID) (fuseops.InodeAttributes, bool) {
+	return fs.cache.materialize(id, func(inode *inode) fuseops.InodeAttributes {
+		return fs.createInodeAttributes(inode.entry)
+	})
 }
 
 func (fs *ZimFS) Destroy() {
@@ -163,26 +172,26 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 	path := parent.buildPathName(op.Name)
 
 	var child *inode
-	if id, ok := fs.cache.getInodeIdByNsPath(parentEntry.Namespace, path); ok {
-		child, _ = fs.cache.getInodeById(id)
-	}
-
-	if child == nil {
+	if child, ok = fs.cache.getInodeByNsPath(parentEntry.Namespace, path, true); !ok {
 		childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Number, parentEntry.Namespace, path)
 		if err != nil {
 			return fs.mapError(err)
 		}
-		child = fs.getOrCreateInode(childEntry)
+		child = fs.getOrCreateInode(childEntry, true)
 	}
 
-	fs.cache.incrementLookup(child.id)
-	fs.setLookupEntry(op, child)
+	attrs, ok := fs.materializeInode(child.id)
+	if !ok {
+		return fuse.ENOENT
+	}
+
+	fs.setLookupEntry(op, child.id, attrs)
 	return nil
 }
 
-func (fs *ZimFS) setLookupEntry(op *fuseops.LookUpInodeOp, child *inode) {
-	op.Entry.Child = child.id
-	op.Entry.Attributes = child.attributes
+func (fs *ZimFS) setLookupEntry(op *fuseops.LookUpInodeOp, childID fuseops.InodeID, attrs fuseops.InodeAttributes) {
+	op.Entry.Child = childID
+	op.Entry.Attributes = attrs
 
 	// We don't spontaneously mutate, so the kernel can cache as long as it wants
 	// (since it also handles invalidation).
@@ -196,14 +205,15 @@ func (fs *ZimFS) ForgetInode(ctx context.Context, op *fuseops.ForgetInodeOp) err
 	return nil
 }
 
-// Return the cached attributes for an already-known inode.
+// Return the attributes for an already-known inode, computing them lazily if the
+// inode was only created during ReadDir.
 func (fs *ZimFS) GetInodeAttributes(ctx context.Context, op *fuseops.GetInodeAttributesOp) error {
-	node, ok := fs.cache.getInodeById(op.Inode)
+	attrs, ok := fs.materializeInode(op.Inode)
 	if !ok {
 		return fuse.ENOENT
 	}
 
-	op.Attributes = node.attributes
+	op.Attributes = attrs
 	op.AttributesExpiration = time.Now().Add(365 * 24 * time.Hour)
 	return nil
 }
@@ -231,32 +241,6 @@ func (fs *ZimFS) makeDirEntry(id fuseops.InodeID, name string, dirType fuseutil.
 	}
 }
 
-func (fs *ZimFS) makeDirEntries(parent *inode, children []zim.ZimEntry) []fuseutil.Dirent {
-	parentEntry := parent.entry.(*zim.DirectoryEntry)
-	dirents := make([]fuseutil.Dirent, len(children))
-	for i, child := range children {
-		childEntry := child.Get()
-		var dirType fuseutil.DirentType
-		if zim.IsDirectoryEntry(childEntry.MimeType) {
-			dirType = fuseutil.DT_Directory
-		} else if zim.IsRedirectEntry(childEntry.MimeType) {
-			dirType = fuseutil.DT_Link
-		} else {
-			dirType = fuseutil.DT_File
-		}
-
-		name, _ := strings.CutPrefix(childEntry.Path, parentEntry.Path+"/")
-		// The offset is the next entry index to read: childEntry.Number points at
-		// this child's first entry, so add one so a subsequent readdir resumes
-		// after it instead of re-reading it.
-		offset := childEntry.Number - parentEntry.Number + 1
-
-		inode := fs.getOrCreateInode(child)
-		dirents[i] = fs.makeDirEntry(inode.id, name, dirType, offset)
-	}
-	return dirents
-}
-
 // Read the entries of a directory previously opened with OpenDir
 func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
 	node, ok := fs.cache.getInodeById(op.Inode)
@@ -269,14 +253,39 @@ func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
 	}
 
 	dirent := node.entry.(*zim.DirectoryEntry)
-	children := fs.zf.GetChildren(dirent, uint32(op.Offset))
-	entries := fs.makeDirEntries(node, children)
-	for _, entry := range entries {
+	startIndex := dirent.Number + uint32(op.Offset)
+
+	for {
+		child, nextIndex, found, err := fs.zf.NextChild(dirent, startIndex)
+		if err != nil {
+			return fs.mapError(err)
+		}
+		if !found {
+			break
+		}
+
+		childEntry := child.Get()
+		var dirType fuseutil.DirentType
+		if zim.IsDirectoryEntry(childEntry.MimeType) {
+			dirType = fuseutil.DT_Directory
+		} else if zim.IsRedirectEntry(childEntry.MimeType) {
+			dirType = fuseutil.DT_Link
+		} else {
+			dirType = fuseutil.DT_File
+		}
+
+		name, _ := strings.CutPrefix(childEntry.Path, dirent.Path+"/")
+		offset := nextIndex - dirent.Number
+
+		inode := fs.getOrCreateInode(child, false)
+		entry := fs.makeDirEntry(inode.id, name, dirType, offset)
+
 		n := fuseutil.WriteDirent(op.Dst[op.BytesRead:], entry)
 		if n == 0 {
 			break
 		}
 		op.BytesRead += n
+		startIndex = nextIndex
 	}
 	return nil
 }

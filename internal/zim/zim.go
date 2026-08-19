@@ -85,25 +85,17 @@ func (zf *ZimFile) Close() error {
 	return zf.contents.Unmap()
 }
 
-// Get the first entry whose path is less than or equal to path in the same
-// namespace. This does not mean the index is exactly where the entry is but the lowest
-// index where it can possibly be found. This is needed because paths in ZIM index are
-// just files and don't contain the top directory entry. For example, there might be
-// a path "example.com/assets/style.css" but no corresponding path for "example.com/assets".
-// Therefore, callers of this function should verify if entry actually exists using
-// GetDirEntry with the index
-func (zf *ZimFile) getEntryLowerBound(start uint32, namespace rune, path string) (uint32, error) {
+// Return the first index i >= start such that the entry at i sorts
+// at or after (namespace, path)
+func (zf *ZimFile) lowerBound(start uint32, namespace rune, path string) (uint32, error) {
 	low, high := start, zf.EntryCount
-	var mid uint32
-	var entry ZimEntry
-	var err error
 	target := Entry{
 		Namespace: namespace,
 		Path:      path,
 	}
 	for low < high {
-		mid = (low + high) / 2
-		entry, err = zf.getZimEntry(mid)
+		mid := (low + high) / 2
+		entry, err := zf.getZimEntry(mid)
 		if err != nil {
 			return 0, err
 		}
@@ -113,30 +105,59 @@ func (zf *ZimFile) getEntryLowerBound(start uint32, namespace rune, path string)
 			high = mid
 		}
 	}
+	return low, nil
+}
+
+// Get the first entry whose path is less than or equal to path in the same
+// namespace. This does not mean the index is exactly where the entry is but the lowest
+// index where it can possibly be found. This is needed because paths in ZIM index are
+// just files and don't contain the top directory entry. For example, there might be
+// a path "example.com/assets/style.css" but no corresponding path for "example.com/assets".
+// Therefore, callers of this function should verify if entry actually exists using
+// GetDirEntry with the index
+func (zf *ZimFile) getEntryLowerBound(start uint32, namespace rune, path string) (uint32, error) {
+	low, err := zf.lowerBound(start, namespace, path)
+	if err != nil {
+		return 0, err
+	}
 	// If low equals zf.EntryCount in cases where the item's path is higher
 	// than the last item, cap the return value to the last possible index
 	if low != 0 && low == zf.EntryCount {
 		low = zf.EntryCount - 1
 	}
-
 	return low, nil
 }
 
-// Get the pathname at offset.
-func (zf *ZimFile) getPathName(start uint64) (string, error) {
+// FirstIndexInNamespace returns the first directory entry index in namespace,
+// or EntryCount if the namespace has no entries.
+func (zf *ZimFile) FirstIndexInNamespace(namespace rune) (uint32, error) {
+	return zf.lowerBound(0, namespace, "")
+}
+
+// getPathBytes returns the zero-terminated path at offset as a sub-slice of the
+// mmap, without copying.
+func (zf *ZimFile) getPathBytes(start uint64) ([]byte, error) {
 	length := uint64(len(zf.contents))
 	if start >= length {
-		return "", CorruptData
+		return nil, CorruptData
 	}
-	// Pathnames are zero terminated.
 	end := start
 	for end < length && zf.contents[end] != 0 {
 		end++
 	}
 	if end == length {
-		return "", CorruptData
+		return nil, CorruptData
 	}
-	return string(zf.contents[start:end]), nil
+	return zf.contents[start:end], nil
+}
+
+// Get the pathname at offset.
+func (zf *ZimFile) getPathName(start uint64) (string, error) {
+	b, err := zf.getPathBytes(start)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
 }
 
 // Get the directory entry located at index
@@ -217,6 +238,37 @@ func (zf *ZimFile) getZimEntry(index uint32) (ZimEntry, error) {
 			readUint32(zf.contents, offset+12),
 		), nil
 	}
+}
+
+// Returns the mime type, namespace, and path (as a sub-slice of
+// the mmap) of the entry at index
+func (zf *ZimFile) readDirentInfo(index uint32) (uint16, rune, []byte, error) {
+	if index >= zf.EntryCount {
+		return 0, 0, nil, EntryDoesNotExist
+	}
+
+	pathListEnd, ok := ptrListEnd(zf.PathPtrPos, zf.EntryCount)
+	if !ok || pathListEnd > uint64(len(zf.contents)) {
+		return 0, 0, nil, CorruptData
+	}
+	pathList := zf.contents[zf.PathPtrPos:pathListEnd]
+
+	offset := readUint64(pathList, uint64(index)*8)
+	if !fits(offset, 4, uint64(len(zf.contents))) {
+		return 0, 0, nil, CorruptData
+	}
+	mimeType := readUint16(zf.contents, offset)
+	namespace := rune(zf.contents[offset+3])
+
+	pathStart := offset + 16
+	if IsRedirectEntry(mimeType) {
+		pathStart = offset + 12
+	}
+	path, err := zf.getPathBytes(pathStart)
+	if err != nil {
+		return 0, 0, nil, err
+	}
+	return mimeType, namespace, path, nil
 }
 
 func (zf *ZimFile) GetZimEntry(namespace rune, path string) (ZimEntry, error) {
@@ -329,61 +381,105 @@ begin:
 	return reader.ReadAt(dst, offset)
 }
 
-// Get the top-level children of the directory entry
-func (zf *ZimFile) GetChildren(entry *DirectoryEntry, start uint32) []ZimEntry {
-	// Given ZIM files do not actually store empty directories, we should iterate
-	// the DirectoryEntry starting from the offset (which is where the first child
-	// starts) till we find the first file whose prefix doesn't start with the
-	// DirectoryEntry. So, offset 0 translates to the first child
-	children := []ZimEntry{}
-	var child ZimEntry
-	var err error
-	var parentPath string
-	if entry.Path == "" { // for root nodes, we don't have any path
-		parentPath = entry.Path
-	} else {
-		parentPath = entry.Path + "/"
+// Returns the next top-level child of dir, scanning from the absolute
+// entry index startIndex. It returns the child, the absolute index to resume
+// from (nextIndex), and found=false when the directory is exhausted.
+func (zf *ZimFile) NextChild(dir *DirectoryEntry, startIndex uint32) (ZimEntry, uint32, bool, error) {
+	var parentPath []byte
+	if dir.Path != "" {
+		parentPath = []byte(dir.Path + "/")
 	}
-	// Map needed to ensure we do not add duplicate entries given we want only the
-	// top-level children. For example, if we have:
-	// example.com/index.html, example.com/js/index.js, example.com/js/neuron.js
-	// we only want the children to be example.com/index.html and example.com/js
-	seen := make(map[string]bool)
-	for i := entry.Number + start; i < zf.EntryCount; i++ {
-		child, err = zf.getZimEntry(i)
-		// We will never get EntryDoesNotExist errors because index is capped
-		// at EntryCount. But we can skip for the other errors.
+
+	for i := startIndex; i < zf.EntryCount; i++ {
+		mimeType, namespace, path, err := zf.readDirentInfo(i)
 		if err != nil {
-			// Skip corrupt entries during listing; they will fail on access.
+			if errors.Is(err, EntryDoesNotExist) {
+				return nil, 0, false, nil
+			}
+			// Skip corrupt entries during listing.
 			continue
 		}
 
-		childEntry := child.Get()
-		if IsDeletedEntry(childEntry.MimeType) || IsLinkTargetEntry(childEntry.MimeType) {
+		if namespace != dir.Namespace {
+			return nil, 0, false, nil
+		}
+		if !bytes.HasPrefix(path, parentPath) {
+			return nil, 0, false, nil
+		}
+
+		rel := path[len(parentPath):]
+		slash := bytes.IndexByte(rel, '/')
+		var name []byte
+		isDir := false
+		if slash < 0 {
+			name = rel
+		} else {
+			name = rel[:slash]
+			isDir = true
+		}
+		if len(name) == 0 {
+			continue
+		}
+
+		if IsDeletedEntry(mimeType) || IsLinkTargetEntry(mimeType) {
 			// Deprecated entries are never listed.
 			continue
 		}
-		if childEntry.Namespace != entry.Namespace {
-			break
+
+		// Find the end of this child's span: the next sibling index.
+		next := i + 1
+		for next < zf.EntryCount {
+			_, namespace2, path2, err2 := zf.readDirentInfo(next)
+			if err2 != nil {
+				break
+			}
+			if namespace2 != dir.Namespace {
+				break
+			}
+			if !bytes.HasPrefix(path2, parentPath) {
+				break
+			}
+			rel2 := path2[len(parentPath):]
+			slash2 := bytes.IndexByte(rel2, '/')
+			var name2 []byte
+			if slash2 < 0 {
+				name2 = rel2
+			} else {
+				name2 = rel2[:slash2]
+			}
+			if !bytes.Equal(name2, name) {
+				break
+			}
+			next++
 		}
 
-		relativePath, isRelative := strings.CutPrefix(childEntry.Path, parentPath)
-		if !isRelative {
-			break
-		}
-
-		before, _, isDir := strings.Cut(relativePath, "/")
-		if _, ok := seen[before]; ok {
-			// nested files which we don't care about
-			continue
-		}
-		seen[before] = true
+		var child ZimEntry
 		if isDir {
-			children = append(children, NewDirectoryEntry(childEntry.Namespace, parentPath+before, i))
+			child = NewDirectoryEntry(namespace, string(parentPath)+string(name), i)
 		} else {
-			children = append(children, child)
+			child, err = zf.getZimEntry(i)
+			if err != nil {
+				continue
+			}
 		}
 
+		return child, next, true, nil
 	}
-	return children
+	return nil, 0, false, nil
+}
+
+// GetChildren returns all top-level children of the directory entry, starting
+// after start entries. It is a convenience wrapper around NextChild for
+// non-streaming callers and tests.
+func (zf *ZimFile) GetChildren(entry *DirectoryEntry, start uint32) []ZimEntry {
+	children := []ZimEntry{}
+	index := entry.Number + start
+	for {
+		child, next, found, err := zf.NextChild(entry, index)
+		if err != nil || !found {
+			return children
+		}
+		children = append(children, child)
+		index = next
+	}
 }
