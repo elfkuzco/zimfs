@@ -62,8 +62,6 @@ func (fs *ZimFS) allocateInodeId() fuseops.InodeID {
 	return fuseops.InodeID(fs.nextInodeID.Add(1))
 }
 
-// getOrCreateInode returns the inode for child, reusing an existing inode when
-// one is already cached.
 func (fs *ZimFS) getOrCreateInode(child zim.ZimEntry) *inode {
 	entry := child.Get()
 
@@ -164,21 +162,20 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 
 	path := parent.buildPathName(op.Name)
 
-	// reuse a cached inode without touching the ZIM index.
+	var child *inode
 	if id, ok := fs.cache.getInodeIdByNsPath(parentEntry.Namespace, path); ok {
-		if child, ok := fs.cache.getInodeById(id); ok {
-			fs.setLookupEntry(op, child)
-			return nil
+		child, _ = fs.cache.getInodeById(id)
+	}
+
+	if child == nil {
+		childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Number, parentEntry.Namespace, path)
+		if err != nil {
+			return fs.mapError(err)
 		}
+		child = fs.getOrCreateInode(childEntry)
 	}
 
-	// resolve the entry and compute attributes
-	childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Number, parentEntry.Namespace, path)
-	if err != nil {
-		return fs.mapError(err)
-	}
-
-	child := fs.getOrCreateInode(childEntry)
+	fs.cache.incrementLookup(child.id)
 	fs.setLookupEntry(op, child)
 	return nil
 }
@@ -191,6 +188,24 @@ func (fs *ZimFS) setLookupEntry(op *fuseops.LookUpInodeOp, child *inode) {
 	// (since it also handles invalidation).
 	op.Entry.AttributesExpiration = time.Now().Add(365 * 24 * time.Hour)
 	op.Entry.EntryExpiration = op.Entry.AttributesExpiration
+}
+
+// Decrement the reference count and evict the inode once it is unreferenced.
+func (fs *ZimFS) ForgetInode(ctx context.Context, op *fuseops.ForgetInodeOp) error {
+	fs.cache.forgetInode(op.Inode, op.N)
+	return nil
+}
+
+// Return the cached attributes for an already-known inode.
+func (fs *ZimFS) GetInodeAttributes(ctx context.Context, op *fuseops.GetInodeAttributesOp) error {
+	node, ok := fs.cache.getInodeById(op.Inode)
+	if !ok {
+		return fuse.ENOENT
+	}
+
+	op.Attributes = node.attributes
+	op.AttributesExpiration = time.Now().Add(365 * 24 * time.Hour)
+	return nil
 }
 
 // Open a directory

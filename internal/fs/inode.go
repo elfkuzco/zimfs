@@ -11,6 +11,12 @@ type inode struct {
 	id         fuseops.InodeID
 	attributes fuseops.InodeAttributes
 	entry      zim.ZimEntry
+
+	// Guarded by InodeCache.mu.
+	// lookupCount tracks the kernel's references to this inode; lookedUp is
+	// true once it has been handed out via LookUpInode.
+	lookupCount uint64
+	lookedUp    bool
 }
 
 // Create a new inode with the supplied attributes, which need not contain

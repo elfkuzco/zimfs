@@ -53,7 +53,8 @@ func (c *InodeCache) getInodeIdByNsPath(namespace rune, path string) (fuseops.In
 }
 
 // getOrAddInode returns the live inode for namespace+path, or inserts and
-// returns a newly built one
+// returns a newly built one. The attributes are precomputed by the caller so the
+// cache lock is never held during (potentially slow) attribute computation.
 func (c *InodeCache) getOrAddInode(namespace rune, path string, attrs fuseops.InodeAttributes, entry zim.ZimEntry, allocate func() fuseops.InodeID) *inode {
 	key := string(namespace) + "/" + path
 
@@ -75,4 +76,39 @@ func (c *InodeCache) getOrAddInode(namespace rune, path string, attrs fuseops.In
 	c.inodes[id] = inode
 	c.paths[key] = id
 	return inode
+}
+
+func (c *InodeCache) incrementLookup(id fuseops.InodeID) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if inode, ok := c.inodes[id]; ok {
+		inode.lookedUp = true
+		inode.lookupCount++
+	}
+}
+
+func (c *InodeCache) forgetInode(id fuseops.InodeID, n uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	inode, ok := c.inodes[id]
+	if !ok {
+		return
+	}
+	if n > inode.lookupCount {
+		n = inode.lookupCount
+	}
+	inode.lookupCount -= n
+
+	if inode.lookedUp && inode.lookupCount == 0 {
+		c.removeLocked(id, inode)
+	}
+}
+
+func (c *InodeCache) removeLocked(id fuseops.InodeID, inode *inode) {
+	entry := inode.entry.Get()
+	key := string(entry.Namespace) + "/" + entry.Path
+	delete(c.inodes, id)
+	delete(c.paths, key)
 }
