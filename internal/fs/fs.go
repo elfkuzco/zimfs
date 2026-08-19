@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -19,22 +19,17 @@ import (
 
 type ZimFS struct {
 	fuseutil.NotImplementedFileSystem
-	mu     sync.Mutex
 	zf     *zim.ZimFile
 	logger *slog.Logger
-
-	// GUARDED_BY(mu)
-	cache *InodeCache
+	cache  *InodeCache
 
 	// The next inode ID to hand out. We assume that this will never overflow,
 	// since even if we were handing out inode IDs at 4 GHz, it would still take
 	// over a century to do so.
-	// GUARDED_BY(mu)
-	nextInodeID fuseops.InodeID
+	nextInodeID atomic.Uint64
 }
 
 func NewZimFS(f *os.File) (*fuse.Server, error) {
-	var err error
 	zf, err := zim.NewZimFile(f)
 	if err != nil {
 		return nil, err
@@ -47,6 +42,8 @@ func NewZimFS(f *os.File) (*fuse.Server, error) {
 		logger: logger,
 		cache:  NewCache(),
 	}
+	fs.nextInodeID.Store(uint64(fuseops.RootInodeID))
+
 	// Set up the root inode.
 	rootAttrs := fuseops.InodeAttributes{
 		Mode: 0500 | os.ModeDir,
@@ -56,26 +53,28 @@ func NewZimFS(f *os.File) (*fuse.Server, error) {
 	rootEntry := zim.NewDirectoryEntry('C', "", 0)
 	rootInode := newInode(fuseops.RootInodeID, rootAttrs, rootEntry)
 	fs.cache.addInode(rootInode)
-	fs.nextInodeID = fuseops.RootInodeID + 1
 
 	server := fuseutil.NewFileSystemServer(fs)
 	return &server, nil
 }
 
-// LOCK_REQUIRED(fs.mu)
-func (fs *ZimFS) allocateInodeId() (id fuseops.InodeID) {
-	id = fs.nextInodeID
-	fs.nextInodeID++
-	return
+func (fs *ZimFS) allocateInodeId() fuseops.InodeID {
+	return fuseops.InodeID(fs.nextInodeID.Add(1))
 }
 
-// LOCK_REQUIRED(fs.mu)
-// Create a new inode for the entry and store it in the cache
-func (fs *ZimFS) allocateNode(child zim.ZimEntry) *inode {
-	newId := fs.allocateInodeId()
-	newInode := newInode(newId, fs.createInodeAttributes(child), child)
-	fs.cache.addInode(newInode)
-	return newInode
+// getOrCreateInode returns the inode for child, reusing an existing inode when
+// one is already cached.
+func (fs *ZimFS) getOrCreateInode(child zim.ZimEntry) *inode {
+	entry := child.Get()
+
+	if id, ok := fs.cache.getInodeIdByNsPath(entry.Namespace, entry.Path); ok {
+		if inode, ok := fs.cache.getInodeById(id); ok {
+			return inode
+		}
+	}
+
+	attrs := fs.createInodeAttributes(child)
+	return fs.cache.getOrAddInode(entry.Namespace, entry.Path, attrs, child, fs.allocateInodeId)
 }
 
 func (fs *ZimFS) Destroy() {
@@ -106,7 +105,6 @@ func (fs *ZimFS) getMode(entry *zim.Entry) os.FileMode {
 	}
 }
 
-// Guarded_by(fs.mu)
 func (fs *ZimFS) createInodeAttributes(zimEntry zim.ZimEntry) fuseops.InodeAttributes {
 	now := time.Now()
 	entry := zimEntry.Get()
@@ -154,10 +152,6 @@ func (fs *ZimFS) createInodeAttributes(zimEntry zim.ZimEntry) fuseops.InodeAttri
 // entry named example.com which would be the directory where the index.html file is
 // located.
 func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
-	var child *inode
 	// Grab the parent directory.
 	parent, found := fs.cache.getInodeById(op.Parent)
 	if !found {
@@ -167,33 +161,29 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 	if !ok {
 		return fuse.EINVAL
 	}
-	// See if we have allocated an inode ID for this namespace+path combination
+
 	path := parent.buildPathName(op.Name)
-	childId, ok := fs.cache.getInodeIdByNsPath(parentEntry.Namespace, path)
-	if !ok {
-		// First time seeing this path, find it in the zim file and allocate
-		// a node for it
-		childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Number, parentEntry.Namespace, path)
-		if err != nil {
-			return fs.mapError(err)
-		}
-		child = fs.allocateNode(childEntry)
-	} else {
-		// If we have allocated an inode ID for this namepace+path combination
-		// but child was deleted perhaps via a call to ForgetInode,
-		// reuse the inodeID since this is a read only filesystem
-		child, ok = fs.cache.getInodeById(childId)
-		if !ok {
-			childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Number, parentEntry.Namespace, path)
-			if err != nil {
-				return fs.mapError(err)
-			}
-			child = newInode(childId, fs.createInodeAttributes(childEntry), childEntry)
-			fs.cache.addInode(child)
+
+	// reuse a cached inode without touching the ZIM index.
+	if id, ok := fs.cache.getInodeIdByNsPath(parentEntry.Namespace, path); ok {
+		if child, ok := fs.cache.getInodeById(id); ok {
+			fs.setLookupEntry(op, child)
+			return nil
 		}
 	}
 
-	// Fill in the response.
+	// resolve the entry and compute attributes
+	childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Number, parentEntry.Namespace, path)
+	if err != nil {
+		return fs.mapError(err)
+	}
+
+	child := fs.getOrCreateInode(childEntry)
+	fs.setLookupEntry(op, child)
+	return nil
+}
+
+func (fs *ZimFS) setLookupEntry(op *fuseops.LookUpInodeOp, child *inode) {
 	op.Entry.Child = child.id
 	op.Entry.Attributes = child.attributes
 
@@ -201,23 +191,15 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 	// (since it also handles invalidation).
 	op.Entry.AttributesExpiration = time.Now().Add(365 * 24 * time.Hour)
 	op.Entry.EntryExpiration = op.Entry.AttributesExpiration
-
-	return nil
 }
 
 // Open a directory
 func (fs *ZimFS) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
 	node, ok := fs.cache.getInodeById(op.Inode)
 	if !ok {
 		return fuse.ENOENT
 	}
 
-	// We don't mutate spontaneosuly, so if the VFS layer has asked for an
-	// inode that doesn't exist, something screwed up earlier (a lookup, a
-	// cache invalidation, etc.).
 	if !node.entry.Get().IsDirectoryEntry() {
 		return fuse.EINVAL
 	}
@@ -234,15 +216,12 @@ func (fs *ZimFS) makeDirEntry(id fuseops.InodeID, name string, dirType fuseutil.
 	}
 }
 
-// LOCK_REQUIRED(fs.mu)
 func (fs *ZimFS) makeDirEntries(parent *inode, children []zim.ZimEntry) []fuseutil.Dirent {
-	_parent := parent.entry
-	parentEntry := _parent.(*zim.DirectoryEntry)
+	parentEntry := parent.entry.(*zim.DirectoryEntry)
 	dirents := make([]fuseutil.Dirent, len(children))
-	var dirType fuseutil.DirentType
-	var childEntry *zim.Entry
 	for i, child := range children {
-		childEntry = child.Get()
+		childEntry := child.Get()
+		var dirType fuseutil.DirentType
 		if zim.IsDirectoryEntry(childEntry.MimeType) {
 			dirType = fuseutil.DT_Directory
 		} else if zim.IsRedirectEntry(childEntry.MimeType) {
@@ -250,26 +229,21 @@ func (fs *ZimFS) makeDirEntries(parent *inode, children []zim.ZimEntry) []fuseut
 		} else {
 			dirType = fuseutil.DT_File
 		}
+
 		name, _ := strings.CutPrefix(childEntry.Path, parentEntry.Path+"/")
 		// The offset is the next entry index to read: childEntry.Number points at
 		// this child's first entry, so add one so a subsequent readdir resumes
 		// after it instead of re-reading it.
 		offset := childEntry.Number - parentEntry.Number + 1
-		if inodeId, ok := fs.cache.getInodeIdByNsPath(childEntry.Namespace, childEntry.Path); !ok {
-			inode := fs.allocateNode(child)
-			dirents[i] = fs.makeDirEntry(inode.id, name, dirType, offset)
-		} else {
-			dirents[i] = fs.makeDirEntry(inodeId, name, dirType, offset)
-		}
+
+		inode := fs.getOrCreateInode(child)
+		dirents[i] = fs.makeDirEntry(inode.id, name, dirType, offset)
 	}
 	return dirents
 }
 
 // Read the entries of a directory previously opened with OpenDir
 func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
-
 	node, ok := fs.cache.getInodeById(op.Inode)
 	if !ok {
 		return fuse.ENOENT
@@ -297,9 +271,6 @@ func (fs *ZimFS) OpenFile(ctx context.Context, op *fuseops.OpenFileOp) error {
 	if (op.OpenFlags & syscall.O_ACCMODE) != syscall.O_RDONLY {
 		return syscall.EACCES
 	}
-	// We don't mutate spontaneosuly, so if the VFS layer has asked for an
-	// inode that doesn't exist, something screwed up earlier (a lookup, a
-	// cache invalidation, etc.).
 	node, ok := fs.cache.getInodeById(op.Inode)
 	if !ok {
 		return fuse.ENOENT
@@ -312,12 +283,11 @@ func (fs *ZimFS) OpenFile(ctx context.Context, op *fuseops.OpenFileOp) error {
 
 // Read data from an open file
 func (fs *ZimFS) ReadFile(ctx context.Context, op *fuseops.ReadFileOp) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
 	node, ok := fs.cache.getInodeById(op.Inode)
 	if !ok {
 		return fuse.ENOENT
 	}
+
 	var err error
 	op.BytesRead, err = fs.zf.Read(node.entry, op.Offset, op.Dst)
 	// Don't return EOF errors; we just indicate EOF to fuse using a short read.
@@ -329,8 +299,6 @@ func (fs *ZimFS) ReadFile(ctx context.Context, op *fuseops.ReadFileOp) error {
 
 // Read the target of a symlink inode
 func (fs *ZimFS) ReadSymlink(ctx context.Context, op *fuseops.ReadSymlinkOp) error {
-	fs.mu.Lock()
-	defer fs.mu.Unlock()
 	node, ok := fs.cache.getInodeById(op.Inode)
 	if !ok {
 		return fuse.ENOENT
