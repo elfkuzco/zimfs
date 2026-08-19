@@ -85,6 +85,8 @@ func (fs *ZimFS) Destroy() {
 func (fs *ZimFS) getMode(entry *zim.Entry) os.FileMode {
 	if entry.IsDirectoryEntry() {
 		return 0500 | os.ModeDir
+	} else if entry.IsRedirectEntry() {
+		return 0777 | os.ModeSymlink
 	} else {
 		return 0400
 	}
@@ -117,6 +119,14 @@ func (fs *ZimFS) createInodeAttributes(zimEntry zim.ZimEntry) fuseops.InodeAttri
 			fs.logger.Error("unable to retrieve size for entry from cluster", "path", entry.Path, "error", err)
 		}
 		attrs.Size = size
+	case *zim.RedirectEntry:
+		attrs.Nlink = 1
+		target, err := fs.zf.ResolveRedirect(entry)
+		if err != nil {
+			fs.logger.Error("unable to resolve redirect for entry", "path", entry.Path, "error", err)
+			return attrs
+		}
+		attrs.Size = uint64(len(target.Get().Path))
 	default:
 		attrs.Nlink = 1
 		attrs.Size = 4096
