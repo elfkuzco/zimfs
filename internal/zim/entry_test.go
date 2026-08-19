@@ -105,8 +105,8 @@ func TestNewDirectoryEntry(t *testing.T) {
 	if d.Path != "example.com/assets" {
 		t.Errorf("Path = %q, want %q", d.Path, "example.com/assets")
 	}
-	if d.Offset != 7 {
-		t.Errorf("Offset = %d, want 7", d.Offset)
+	if d.Number != 7 {
+		t.Errorf("Number = %d, want 7", d.Number)
 	}
 	if !d.IsDirectoryEntry() {
 		t.Error("IsDirectoryEntry() = false, want true")

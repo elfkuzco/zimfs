@@ -31,6 +31,7 @@ type ZimFile struct {
 
 var (
 	EntryDoesNotExist = errors.New("entry does not exist")
+	EntryDeprecated   = errors.New("entry is deprecated")
 )
 
 // Create a Zim FS server and maps the file to memory using mmap.
@@ -53,9 +54,8 @@ func NewZimFile(f *os.File) (*ZimFile, error) {
 	}, nil
 }
 
-// Close the zim file held in memory and it's associated file handler
+// Close the zim file held in memory. The associated file handler is not closed.
 func (zf *ZimFile) Close() error {
-	defer zf.fh.Close()
 	return zf.contents.Unmap()
 }
 
@@ -119,35 +119,32 @@ func (zf *ZimFile) getZimEntry(index uint32) (ZimEntry, error) {
 	mimeType := ReadUint16(zf.contents, offset)
 
 	if IsDeletedEntry(mimeType) || IsLinkTargetEntry(mimeType) {
-		return nil, EntryDoesNotExist
+		return nil, EntryDeprecated
 	}
 
 	paramLen := zf.contents[offset+2]
 	ns := zf.contents[offset+3]
 	revision := ReadUint32(zf.contents, offset+4)
 	if IsRedirectEntry(mimeType) {
-		return &RedirectEntry{
-			Entry{
-				mimeType,
-				paramLen,
-				rune(ns),
-				revision,
-				zf.getPathName(offset + 12),
-			},
-			ReadUint32(zf.contents, offset+8),
-		}, nil
-	}
-	return &ContentEntry{
-		Entry{
-			mimeType,
+		return NewRedirectEntry(
 			paramLen,
 			rune(ns),
 			revision,
-			zf.getPathName(offset + 16),
-		},
+			zf.getPathName(offset+12),
+			index,
+			ReadUint32(zf.contents, offset+8),
+		), nil
+	}
+	return NewContentEntry(
+		mimeType,
+		paramLen,
+		rune(ns),
+		revision,
+		zf.getPathName(offset+16),
+		index,
 		ReadUint32(zf.contents, offset+8),
 		ReadUint32(zf.contents, offset+12),
-	}, nil
+	), nil
 }
 
 func (zf *ZimFile) GetZimEntry(namespace rune, path string) (ZimEntry, error) {
@@ -188,4 +185,50 @@ func (zf *ZimFile) GetOrCreateCluster(entry *ContentEntry) (ClusterReader, error
 		zf.clusters[entry.ClusterNumber] = cluster
 	}
 	return zf.clusters[entry.ClusterNumber], nil
+}
+
+// Get the top-level children of the directory entry
+func (zf *ZimFile) GetChildren(entry *DirectoryEntry, start uint32) []ZimEntry {
+	// Given ZIM files do not actually store empty directories, we should iterate
+	// the DirectoryEntry starting from the offset (which is where the first child
+	// starts) till we find the first file whose prefix doesn't start with the
+	// DirectoryEntry. So, offset 0 translates to the first child
+	children := []ZimEntry{}
+	var child ZimEntry
+	var err error
+	parentPath := entry.Path + "/"
+	// Map needed to ensure we do not add duplicate entries given we want only the
+	// top-level children. For example, if we have:
+	// example.com/index.html, example.com/js/index.js, example.com/js/neuron.js
+	// we only want the children to be example.com/index.html and example.com/js
+	seen := make(map[string]bool)
+	for i := entry.Number + start; i < zf.EntryCount; i++ {
+		child, err = zf.getZimEntry(i)
+		// We will never get EntryDoesNotExist errors because index is capped
+		// at EntryCount. But we can skip for the other errors. For now, the only
+		// other error is EntryDeprecated which we don't care about
+		if err != nil {
+			continue
+		}
+
+		childEntry := child.Get()
+		relativePath, isRelative := strings.CutPrefix(childEntry.Path, parentPath)
+		if !isRelative {
+			break
+		}
+
+		before, _, isDir := strings.Cut(relativePath, "/")
+		if _, ok := seen[before]; ok {
+			// nested files which we don't care about
+			continue
+		}
+		seen[before] = true
+		if isDir {
+			children = append(children, NewDirectoryEntry(childEntry.Namespace, parentPath+before, i))
+		} else {
+			children = append(children, child)
+		}
+
+	}
+	return children
 }

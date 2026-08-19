@@ -234,3 +234,158 @@ func TestGetZimEntryFromStart(t *testing.T) {
 		}
 	})
 }
+
+// childExpectation describes an expected entry returned by GetChildren.
+type childExpectation struct {
+	kind      string // "content", "directory", or "redirect"
+	namespace rune
+	path      string
+	offset    uint32 // only checked for directories
+}
+
+// assertChildren verifies that GetChildren returned the expected entries in order.
+func assertChildren(t *testing.T, got []ZimEntry, want []childExpectation) {
+	t.Helper()
+
+	if len(got) != len(want) {
+		t.Fatalf("GetChildren() returned %d entries, want %d", len(got), len(want))
+	}
+
+	for i, w := range want {
+		g := got[i]
+		entry := g.Get()
+
+		if entry.Namespace != w.namespace {
+			t.Errorf("child[%d].Namespace = %q, want %q", i, entry.Namespace, w.namespace)
+		}
+		if entry.Path != w.path {
+			t.Errorf("child[%d].Path = %q, want %q", i, entry.Path, w.path)
+		}
+
+		switch w.kind {
+		case "content":
+			if _, ok := g.(*ContentEntry); !ok {
+				t.Errorf("child[%d] type = %T, want *ContentEntry", i, g)
+			}
+		case "redirect":
+			if _, ok := g.(*RedirectEntry); !ok {
+				t.Errorf("child[%d] type = %T, want *RedirectEntry", i, g)
+			}
+		case "directory":
+			d, ok := g.(*DirectoryEntry)
+			if !ok {
+				t.Errorf("child[%d] type = %T, want *DirectoryEntry", i, g)
+				continue
+			}
+			if d.Number != w.offset {
+				t.Errorf("child[%d].Number = %d, want %d", i, d.Number, w.offset)
+			}
+		}
+	}
+}
+
+// directoryEntry resolves path to an implicit directory entry using GetZimEntry.
+func directoryEntry(t *testing.T, zf *ZimFile, namespace rune, path string) *DirectoryEntry {
+	t.Helper()
+
+	entry, err := zf.GetZimEntry(namespace, path)
+	if err != nil {
+		t.Fatalf("GetZimEntry(%q, %q) error = %v", namespace, path, err)
+	}
+	dir, ok := entry.(*DirectoryEntry)
+	if !ok {
+		t.Fatalf("GetZimEntry(%q, %q) type = %T, want *DirectoryEntry", namespace, path, entry)
+	}
+	return dir
+}
+
+func TestGetChildren(t *testing.T) {
+	t.Run("returns top-level files and directories", func(t *testing.T) {
+		zf := buildZimFile(t, []testDirEntry{
+			{namespace: 'C', path: "example.com/about.html"},
+			{namespace: 'C', path: "example.com/assets/css/style.css"},
+			{namespace: 'C', path: "example.com/assets/js/main.js"},
+			{namespace: 'C', path: "example.com/index.html"},
+			{namespace: 'C', path: "example.com/redirect.html", mimeType: REDIRECT_ENTRY_MIMETYPE, redirectIndex: 3},
+			{namespace: 'M', path: "Creator"},
+		})
+
+		dir := directoryEntry(t, zf, 'C', "example.com")
+
+		assertChildren(t, zf.GetChildren(dir, 0), []childExpectation{
+			{"content", 'C', "example.com/about.html", 0},
+			{"directory", 'C', "example.com/assets", 1},
+			{"content", 'C', "example.com/index.html", 0},
+			{"redirect", 'C', "example.com/redirect.html", 0},
+		})
+	})
+
+	t.Run("deduplicates sibling files under a directory", func(t *testing.T) {
+		zf := buildZimFile(t, []testDirEntry{
+			{namespace: 'C', path: "example.com/index.html"},
+			{namespace: 'C', path: "example.com/js/index.js"},
+			{namespace: 'C', path: "example.com/js/neuron.js"},
+		})
+
+		dir := directoryEntry(t, zf, 'C', "example.com")
+
+		assertChildren(t, zf.GetChildren(dir, 0), []childExpectation{
+			{"content", 'C', "example.com/index.html", 0},
+			{"directory", 'C', "example.com/js", 1},
+		})
+	})
+
+	t.Run("skips deleted and link target entries", func(t *testing.T) {
+		zf := buildZimFile(t, []testDirEntry{
+			{namespace: 'C', path: "example.com/about.html"},
+			{namespace: 'C', path: "example.com/deleted.html", mimeType: DELETED_ENTRY_MIMETYPE},
+			{namespace: 'C', path: "example.com/index.html"},
+			{namespace: 'C', path: "example.com/link.html", mimeType: LINK_TARGET_MIMETYPE},
+		})
+
+		dir := NewDirectoryEntry('C', "example.com", 0)
+
+		assertChildren(t, zf.GetChildren(dir, 0), []childExpectation{
+			{"content", 'C', "example.com/about.html", 0},
+			{"content", 'C', "example.com/index.html", 0},
+		})
+	})
+
+	t.Run("requires a trailing slash for prefix match", func(t *testing.T) {
+		zf := buildZimFile(t, []testDirEntry{
+			{namespace: 'C', path: "example.com/assets/style.css"},
+			{namespace: 'C', path: "example.com/assets2/other.html"},
+		})
+
+		dir := directoryEntry(t, zf, 'C', "example.com/assets")
+
+		assertChildren(t, zf.GetChildren(dir, 0), []childExpectation{
+			{"content", 'C', "example.com/assets/style.css", 0},
+		})
+	})
+
+	t.Run("offset skips earlier children", func(t *testing.T) {
+		zf := buildZimFile(t, []testDirEntry{
+			{namespace: 'C', path: "example.com/a.html"},
+			{namespace: 'C', path: "example.com/b.html"},
+			{namespace: 'C', path: "example.com/c.html"},
+		})
+
+		dir := directoryEntry(t, zf, 'C', "example.com")
+
+		assertChildren(t, zf.GetChildren(dir, 1), []childExpectation{
+			{"content", 'C', "example.com/b.html", 0},
+			{"content", 'C', "example.com/c.html", 0},
+		})
+	})
+
+	t.Run("empty directory returns no children", func(t *testing.T) {
+		zf := buildZimFile(t, []testDirEntry{
+			{namespace: 'C', path: "example.com/about.html"},
+		})
+
+		dir := NewDirectoryEntry('C', "example.com/empty", zf.EntryCount)
+
+		assertChildren(t, zf.GetChildren(dir, 0), nil)
+	})
+}

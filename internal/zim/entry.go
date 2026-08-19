@@ -22,6 +22,20 @@ type Entry struct {
 	Revision  uint32
 	// String with the path as referred in the path pointer list
 	Path string
+	// Where the entry is found. For directories, this is where the first
+	// child starts
+	Number uint32
+}
+
+func NewEntry(mimeType uint16, paramLen uint8, namespace rune, revision uint32, path string, number uint32) Entry {
+	return Entry{
+		MimeType:     mimeType,
+		ParameterLen: paramLen,
+		Namespace:    namespace,
+		Revision:     revision,
+		Path:         path,
+		Number:       number,
+	}
 }
 
 func IsRedirectEntry(mimeType uint16) bool {
@@ -74,20 +88,36 @@ type ContentEntry struct {
 	BlobNumber uint32
 }
 
+func NewContentEntry(mimeType uint16, paramLen uint8, namespace rune, revision uint32, path string, offset uint32, clusterNumber uint32, blobNumber uint32) *ContentEntry {
+	entry := NewEntry(mimeType, paramLen, namespace, revision, path, offset)
+	return &ContentEntry{
+		Entry:         entry,
+		ClusterNumber: clusterNumber,
+		BlobNumber:    blobNumber,
+	}
+}
+
 type RedirectEntry struct {
 	Entry
 	// Pointer to the directory entry of the redirect target
 	RedirectIndex uint32
 }
 
+func NewRedirectEntry(paramLen uint8, namespace rune, revision uint32, path string, number uint32, redirectIndex uint32) *RedirectEntry {
+	entry := NewEntry(REDIRECT_ENTRY_MIMETYPE, paramLen, namespace, revision, path, number)
+	return &RedirectEntry{
+		Entry:         entry,
+		RedirectIndex: redirectIndex,
+	}
+}
+
 // ZIM files do not actually have a directory entry. This container merely indicates
 // the path has children in it's hierachy
 type DirectoryEntry struct {
 	Entry
-	Offset uint32 // where the first chlid path starts
 }
 
-func NewDirectoryEntry(namespace rune, path string, offset uint32) *DirectoryEntry {
+func NewDirectoryEntry(namespace rune, path string, number uint32) *DirectoryEntry {
 	return &DirectoryEntry{
 		Entry{
 			MimeType:     DIRECTORY_ENTRY_MIMETYPE,
@@ -95,7 +125,7 @@ func NewDirectoryEntry(namespace rune, path string, offset uint32) *DirectoryEnt
 			Namespace:    namespace,
 			Revision:     0,
 			Path:         path,
+			Number:       number,
 		},
-		offset,
 	}
 }

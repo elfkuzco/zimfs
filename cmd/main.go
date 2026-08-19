@@ -13,9 +13,7 @@ func main() {
 	// chown(), that also need checking!).  Since running zimfs as
 	// root will therefore open Metrodome-sized holes in the system
 	// security, we'll check if root is trying to mount the
-	// filesystem and refuse if it is.  The somewhat smaller hole of
-	// an ordinary user doing it with the allow_other flag is still
-	// there because I don't want to parse the options string.
+	// filesystem and refuse if it is.
 	if (os.Getuid() == 0) || (os.Geteuid() == 0) {
 		logger.Error(
 			"Running zimfs as root opens unnacceptable security holes\n",

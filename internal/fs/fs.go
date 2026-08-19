@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,8 +13,6 @@ import (
 	"github.com/jacobsa/fuse/fuseops"
 	"github.com/jacobsa/fuse/fuseutil"
 )
-
-var TIME_MAX = time.Unix(1<<63-62135596801, 999999999)
 
 type ZimFS struct {
 	fuseutil.NotImplementedFileSystem
@@ -69,7 +68,7 @@ func (fs *ZimFS) allocateInodeId() (id fuseops.InodeID) {
 
 // LOCK_REQUIRED(fs.mu)
 // Create a new inode for the entry and store it in the cache
-func (fs *ZimFS) allocateNode(parent *inode, child zim.ZimEntry) *inode {
+func (fs *ZimFS) allocateNode(child zim.ZimEntry) *inode {
 	newId := fs.allocateInodeId()
 	newInode := newInode(newId, fs.createInodeAttributes(child), child)
 	fs.cache.addInode(newInode)
@@ -108,12 +107,12 @@ func (fs *ZimFS) createInodeAttributes(zimEntry zim.ZimEntry) fuseops.InodeAttri
 		attrs.Nlink = 1
 		cluster, err := fs.zf.GetOrCreateCluster(entry)
 		if err != nil {
-			fs.logger.Error("unable to get cluster for entry %s: %v", entry.Path, err)
+			fs.logger.Error("unable to get cluster for entry", "path", entry.Path, "error", err)
 			return attrs
 		}
 		size, err := cluster.GetBlobSize(entry.BlobNumber)
 		if err != nil {
-			fs.logger.Error("unable to retrieve size for entry %s  from cluster: %v", entry.Path, err)
+			fs.logger.Error("unable to retrieve size for entry from cluster", "path", entry.Path, "error", err)
 		}
 		attrs.Size = size
 	default:
@@ -142,18 +141,18 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 	if !ok {
 		// First time seeing this path, find it in the zim file and allocate
 		// a node for it
-		childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Offset, parentEntry.Namespace, path)
+		childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Number, parentEntry.Namespace, path)
 		if err != nil {
 			return fuse.ENOENT
 		}
-		child = fs.allocateNode(parent, childEntry)
+		child = fs.allocateNode(childEntry)
 	} else {
 		// If we have allocated an inode ID for this namepace+path combination
 		// but child was deleted perhaps via a call to ForgetInode,
 		// reuse the inodeID since this is a read only filesystem
 		child, ok = fs.cache.getInodeById(childId)
 		if !ok {
-			childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Offset, parentEntry.Namespace, path)
+			childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Number, parentEntry.Namespace, path)
 			if err != nil {
 				return fuse.ENOENT
 			}
@@ -168,8 +167,97 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 
 	// We don't spontaneously mutate, so the kernel can cache as long as it wants
 	// (since it also handles invalidation).
-	op.Entry.AttributesExpiration = TIME_MAX
+	op.Entry.AttributesExpiration = time.Now().Add(365 * 24 * time.Hour)
 	op.Entry.EntryExpiration = op.Entry.AttributesExpiration
 
+	return nil
+}
+
+// Open a directory
+func (fs *ZimFS) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	node, ok := fs.cache.getInodeById(op.Inode)
+	if !ok {
+		return fuse.ENOENT
+	}
+
+	// We don't mutate spontaneosuly, so if the VFS layer has asked for an
+	// inode that doesn't exist, something screwed up earlier (a lookup, a
+	// cache invalidation, etc.).
+	if !node.entry.Get().IsDirectoryEntry() {
+		return fuse.EINVAL
+	}
+
+	return nil
+}
+
+func (fs *ZimFS) makeDirEntry(id fuseops.InodeID, name string, dirType fuseutil.DirentType, offset uint32) fuseutil.Dirent {
+	return fuseutil.Dirent{
+		Name:   name,
+		Type:   dirType,
+		Inode:  id,
+		Offset: fuseops.DirOffset(offset),
+	}
+}
+
+// LOCK_REQUIRED(fs.mu)
+func (fs *ZimFS) makeDirEntries(parent *inode, children []zim.ZimEntry) []fuseutil.Dirent {
+	_parent := parent.entry
+	parentEntry := _parent.(*zim.DirectoryEntry)
+	dirents := []fuseutil.Dirent{}
+	var dirType fuseutil.DirentType
+	var childEntry *zim.Entry
+	for _, child := range children {
+		childEntry = child.Get()
+		if zim.IsDirectoryEntry(childEntry.MimeType) {
+			dirType = fuseutil.DT_Directory
+		} else if zim.IsRedirectEntry(childEntry.MimeType) {
+			dirType = fuseutil.DT_Link
+		} else {
+			dirType = fuseutil.DT_File
+		}
+		name, _ := strings.CutPrefix(parentEntry.Path+"/", childEntry.Path)
+		offset := childEntry.Number - parentEntry.Number
+		if inodeId, ok := fs.cache.getInodeIdByNsPath(childEntry.Namespace, childEntry.Path); !ok {
+			inode := fs.allocateNode(child)
+			dirents = append(dirents,
+				fs.makeDirEntry(inode.id, name, dirType, offset),
+			)
+
+		} else {
+			dirents = append(dirents,
+				fs.makeDirEntry(inodeId, name, dirType, offset),
+			)
+		}
+	}
+	return dirents
+}
+
+// Read the entries of a directory previously opened with OpenDir
+func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+
+	node, ok := fs.cache.getInodeById(op.Inode)
+	if !ok {
+		return fuse.ENOENT
+	}
+
+	if !node.entry.Get().IsDirectoryEntry() {
+		return fuse.EINVAL
+	}
+
+	dirent := node.entry.(*zim.DirectoryEntry)
+	children := fs.zf.GetChildren(dirent, uint32(op.Offset))
+	entries := fs.makeDirEntries(node, children)
+	for _, entry := range entries {
+		n := fuseutil.WriteDirent(op.Dst[op.BytesRead:], entry)
+		if n == 0 {
+			break
+		}
+		op.BytesRead += n
+	}
 	return nil
 }

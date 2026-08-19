@@ -108,25 +108,25 @@ type CompressedCluster struct {
 }
 
 func (cc *CompressedCluster) newReader() (io.ReadCloser, error) {
-	contents := cc.Contents[1:]
+	contents := bytes.NewReader(cc.Contents[1:])
 	switch cc.compression {
 	case Zstd:
-		decoder, err := zstd.NewReader(bytes.NewReader(contents))
+		decoder, err := zstd.NewReader(contents)
 		if err != nil {
 			return nil, err
 		}
 		return decoder.IOReadCloser(), nil
 	case Lzma2:
-		decoder, err := xz.NewReader(bytes.NewReader(contents))
+		decoder, err := xz.NewReader(contents)
 		if err != nil {
 			return nil, err
 		}
 		return io.NopCloser(decoder), nil
 	case Bzip2:
-		decoder := bzip2.NewReader(bytes.NewReader(contents))
+		decoder := bzip2.NewReader(contents)
 		return io.NopCloser(decoder), nil
 	case Zlib:
-		decoder, err := zlib.NewReader(bytes.NewReader(contents))
+		decoder, err := zlib.NewReader(contents)
 		if err != nil {
 			return nil, err
 		}

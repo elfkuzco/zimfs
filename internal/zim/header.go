@@ -1,7 +1,6 @@
 package zim
 
 import (
-	"encoding/binary"
 	"errors"
 	"os"
 
@@ -54,7 +53,7 @@ func ReadHeader(file *os.File) (*Header, error) {
 		return nil, err
 	}
 
-	magicNumber := binary.LittleEndian.Uint32(buffer[0:4])
+	magicNumber := ReadUint32(buffer, 0)
 	if magicNumber != ZIM_MAGIC_NUMBER {
 		return nil, InvalidZimHeader
 	}
@@ -65,18 +64,18 @@ func ReadHeader(file *os.File) (*Header, error) {
 	}
 	header := &Header{
 		MagicNumber:   magicNumber,
-		MajorVersion:  binary.LittleEndian.Uint16(buffer[4:6]),
-		MinorVersion:  binary.LittleEndian.Uint16(buffer[6:8]),
+		MajorVersion:  ReadUint16(buffer, 4),
+		MinorVersion:  ReadUint16(buffer, 6),
 		Id:            id,
-		EntryCount:    binary.LittleEndian.Uint32(buffer[24:28]),
-		ClusterCount:  binary.LittleEndian.Uint32(buffer[28:32]),
-		PathPtrPos:    binary.LittleEndian.Uint64(buffer[32:40]),
-		TitlePtrPos:   binary.LittleEndian.Uint64(buffer[40:48]),
-		ClusterPtrPos: binary.LittleEndian.Uint64(buffer[48:56]),
-		MimeListPos:   binary.LittleEndian.Uint64(buffer[56:64]),
-		MainPage:      binary.LittleEndian.Uint32(buffer[64:68]),
-		LayoutPage:    binary.LittleEndian.Uint32(buffer[68:72]),
-		ChecksumPos:   binary.LittleEndian.Uint64(buffer[72:ZIM_HEADER_LENGTH]),
+		EntryCount:    ReadUint32(buffer, 24),
+		ClusterCount:  ReadUint32(buffer, 28),
+		PathPtrPos:    ReadUint64(buffer, 32),
+		TitlePtrPos:   ReadUint64(buffer, 40),
+		ClusterPtrPos: ReadUint64(buffer, 48),
+		MimeListPos:   ReadUint64(buffer, 56),
+		MainPage:      ReadUint32(buffer, 64),
+		LayoutPage:    ReadUint32(buffer, 68),
+		ChecksumPos:   ReadUint64(buffer, 72),
 	}
 	return header, nil
 }
