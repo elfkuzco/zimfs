@@ -39,6 +39,9 @@ type ZimFile struct {
 	// mutex for restricting access to clusters
 	mu       sync.Mutex
 	clusters []ClusterReader
+
+	// shared bounded cache for decompressed cluster data.
+	cache *clusterCache
 }
 
 var (
@@ -69,11 +72,11 @@ func NewZimFile(f *os.File) (*ZimFile, error) {
 	}
 
 	return &ZimFile{
-		header,
-		contents,
-		f,
-		sync.Mutex{},
-		make([]ClusterReader, header.ClusterCount),
+		Header:   header,
+		contents: contents,
+		fh:       f,
+		clusters: make([]ClusterReader, header.ClusterCount),
+		cache:    newClusterCache(MAX_CLUSTER_CACHE_SIZE),
 	}, nil
 }
 
@@ -280,6 +283,10 @@ func (zf *ZimFile) GetOrCreateCluster(entry *ContentEntry) (ClusterReader, error
 	cluster, err := NewCluster(zf.contents[start:])
 	if err != nil {
 		return nil, err
+	}
+	if cc, ok := cluster.(*CompressedCluster); ok {
+		cc.clusterNumber = entry.ClusterNumber
+		cc.cache = zf.cache
 	}
 	zf.clusters[entry.ClusterNumber] = cluster
 	return cluster, nil

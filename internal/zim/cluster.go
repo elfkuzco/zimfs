@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 	"github.com/ulikunitz/xz"
@@ -140,6 +141,11 @@ func (ucc *UncompressedCluster) GetBlob(n uint32) ([]byte, error) {
 type CompressedCluster struct {
 	*Cluster
 	compression Compression
+
+	clusterNumber uint32
+	cache         *clusterCache
+
+	mu sync.Mutex // serializes this cluster's initial decompression
 }
 
 func (cc *CompressedCluster) newReader() (io.ReadCloser, error) {
@@ -211,54 +217,87 @@ func (cc *CompressedCluster) readOffsets() ([]uint64, io.ReadCloser, error) {
 	return offsets, r, nil
 }
 
-func (cc *CompressedCluster) GetBlobSize(n uint32) (uint64, error) {
+// decompress reads and decodes the whole cluster, returning its offset table
+// and blob data.
+func (cc *CompressedCluster) decompress() (clusterData, error) {
 	offsets, r, err := cc.readOffsets()
+	if err != nil {
+		return clusterData{}, err
+	}
+	defer r.Close()
+
+	base := offsets[0]
+	total := offsets[len(offsets)-1]
+	if total < base {
+		return clusterData{}, CorruptData
+	}
+	size := total - base
+	if size > uint64(^uint(0)>>1) {
+		return clusterData{}, CorruptData
+	}
+
+	data := make([]byte, size)
+	if _, err := io.ReadFull(r, data); err != nil {
+		return clusterData{}, err
+	}
+	return clusterData{offsets: offsets, blobs: data}, nil
+}
+
+// return the cluster's decompressed data, decompressing it at
+// most once per cluster and storing the result in the shared bounded cache.
+func (cc *CompressedCluster) getDecompressed() (clusterData, error) {
+	if data, ok := cc.cache.get(cc.clusterNumber); ok {
+		return data, nil
+	}
+
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+
+	// Another goroutine may have decompressed while we waited for cc.mu.
+	if data, ok := cc.cache.get(cc.clusterNumber); ok {
+		return data, nil
+	}
+
+	data, err := cc.decompress()
+	if err != nil {
+		return data, err
+	}
+	cc.cache.put(cc.clusterNumber, data)
+	return data, nil
+}
+
+func (cc *CompressedCluster) GetBlobSize(n uint32) (uint64, error) {
+	data, err := cc.getDecompressed()
 	if err != nil {
 		return 0, err
 	}
-	defer r.Close()
 
-	if uint64(n)+1 >= uint64(len(offsets)) {
+	if uint64(n)+1 >= uint64(len(data.offsets)) {
 		return 0, fmt.Errorf("blob number %d out of range", n)
 	}
-	if offsets[n+1] < offsets[n] {
+	if data.offsets[n+1] < data.offsets[n] {
 		return 0, CorruptData
 	}
-	return offsets[n+1] - offsets[n], nil
+	return data.offsets[n+1] - data.offsets[n], nil
 }
 
 func (cc *CompressedCluster) GetBlob(n uint32) ([]byte, error) {
-	offsets, r, err := cc.readOffsets()
+	data, err := cc.getDecompressed()
 	if err != nil {
 		return nil, err
 	}
-	defer r.Close()
 
-	if uint64(n)+1 >= uint64(len(offsets)) {
+	if uint64(n)+1 >= uint64(len(data.offsets)) {
 		return nil, fmt.Errorf("blob number %d out of range", n)
 	}
 
-	start := offsets[n]
-	end := offsets[n+1]
-	if end < start || start < offsets[0] {
+	base := data.offsets[0]
+	start := data.offsets[n]
+	end := data.offsets[n+1]
+	if start < base || end < start || end-base > uint64(len(data.blobs)) {
 		return nil, CorruptData
 	}
-	size := end - start
-	if size > uint64(^uint(0)>>1) {
-		return nil, CorruptData
-	}
-
-	// Skip blobs 0..n-1.
-	if _, err := io.CopyN(io.Discard, r, int64(start-offsets[0])); err != nil {
-		return nil, err
-	}
-
-	out := make([]byte, size)
-	if _, err := io.ReadFull(r, out); err != nil {
-		return nil, err
-	}
-
-	return out, nil
+	return data.blobs[start-base : end-base], nil
 }
 
 func NewCluster(contents []byte) (ClusterReader, error) {
