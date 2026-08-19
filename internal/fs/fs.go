@@ -2,6 +2,7 @@ package fs
 
 import (
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -81,6 +82,19 @@ func (fs *ZimFS) Destroy() {
 	fs.zf.Close()
 }
 
+// mapError translates zim-layer errors into the appropriate FUSE errno.
+// Missing entries map to ENOENT; corrupt/truncated data and everything else map
+// to EIO so a malformed archive never panics the mount process.
+func (fs *ZimFS) mapError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, zim.EntryDoesNotExist) {
+		return fuse.ENOENT
+	}
+	return fuse.EIO
+}
+
 // Get the mode of the ZIM entry
 func (fs *ZimFS) getMode(entry *zim.Entry) os.FileMode {
 	if entry.IsDirectoryEntry() {
@@ -145,8 +159,14 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 
 	var child *inode
 	// Grab the parent directory.
-	parent := fs.cache.getInodeByIdOrDie(op.Parent)
-	parentEntry := parent.entry.(*zim.DirectoryEntry)
+	parent, found := fs.cache.getInodeById(op.Parent)
+	if !found {
+		return fuse.ENOENT
+	}
+	parentEntry, ok := parent.entry.(*zim.DirectoryEntry)
+	if !ok {
+		return fuse.EINVAL
+	}
 	// See if we have allocated an inode ID for this namespace+path combination
 	path := parent.buildPathName(op.Name)
 	childId, ok := fs.cache.getInodeIdByNsPath(parentEntry.Namespace, path)
@@ -155,7 +175,7 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 		// a node for it
 		childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Number, parentEntry.Namespace, path)
 		if err != nil {
-			return fuse.ENOENT
+			return fs.mapError(err)
 		}
 		child = fs.allocateNode(childEntry)
 	} else {
@@ -166,7 +186,7 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 		if !ok {
 			childEntry, err := fs.zf.GetZimEntryFromStart(parentEntry.Number, parentEntry.Namespace, path)
 			if err != nil {
-				return fuse.ENOENT
+				return fs.mapError(err)
 			}
 			child = newInode(childId, fs.createInodeAttributes(childEntry), childEntry)
 			fs.cache.addInode(child)
@@ -218,10 +238,10 @@ func (fs *ZimFS) makeDirEntry(id fuseops.InodeID, name string, dirType fuseutil.
 func (fs *ZimFS) makeDirEntries(parent *inode, children []zim.ZimEntry) []fuseutil.Dirent {
 	_parent := parent.entry
 	parentEntry := _parent.(*zim.DirectoryEntry)
-	dirents := []fuseutil.Dirent{}
+	dirents := make([]fuseutil.Dirent, len(children))
 	var dirType fuseutil.DirentType
 	var childEntry *zim.Entry
-	for _, child := range children {
+	for i, child := range children {
 		childEntry = child.Get()
 		if zim.IsDirectoryEntry(childEntry.MimeType) {
 			dirType = fuseutil.DT_Directory
@@ -230,18 +250,16 @@ func (fs *ZimFS) makeDirEntries(parent *inode, children []zim.ZimEntry) []fuseut
 		} else {
 			dirType = fuseutil.DT_File
 		}
-		name, _ := strings.CutPrefix(parentEntry.Path+"/", childEntry.Path)
-		offset := childEntry.Number - parentEntry.Number
+		name, _ := strings.CutPrefix(childEntry.Path, parentEntry.Path+"/")
+		// The offset is the next entry index to read: childEntry.Number points at
+		// this child's first entry, so add one so a subsequent readdir resumes
+		// after it instead of re-reading it.
+		offset := childEntry.Number - parentEntry.Number + 1
 		if inodeId, ok := fs.cache.getInodeIdByNsPath(childEntry.Namespace, childEntry.Path); !ok {
 			inode := fs.allocateNode(child)
-			dirents = append(dirents,
-				fs.makeDirEntry(inode.id, name, dirType, offset),
-			)
-
+			dirents[i] = fs.makeDirEntry(inode.id, name, dirType, offset)
 		} else {
-			dirents = append(dirents,
-				fs.makeDirEntry(inodeId, name, dirType, offset),
-			)
+			dirents[i] = fs.makeDirEntry(inodeId, name, dirType, offset)
 		}
 	}
 	return dirents
@@ -306,7 +324,7 @@ func (fs *ZimFS) ReadFile(ctx context.Context, op *fuseops.ReadFileOp) error {
 	if err == io.EOF {
 		return nil
 	}
-	return err
+	return fs.mapError(err)
 }
 
 // Read the target of a symlink inode
@@ -324,7 +342,7 @@ func (fs *ZimFS) ReadSymlink(ctx context.Context, op *fuseops.ReadSymlinkOp) err
 	redirect := node.entry.(*zim.RedirectEntry)
 	target, err := fs.zf.ResolveRedirect(redirect)
 	if err != nil {
-		return fuse.ENOENT
+		return fs.mapError(err)
 	}
 
 	op.Target = target.Get().Path

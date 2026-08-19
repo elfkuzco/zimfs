@@ -1,8 +1,6 @@
 package fs
 
 import (
-	"fmt"
-
 	"github.com/jacobsa/fuse/fuseops"
 )
 
@@ -32,14 +30,6 @@ func (c *InodeCache) addInode(inode *inode) {
 func (c *InodeCache) getInodeById(id fuseops.InodeID) (*inode, bool) {
 	inode, ok := c.inodes[id]
 	return inode, ok
-}
-
-func (c *InodeCache) getInodeByIdOrDie(id fuseops.InodeID) *inode {
-	inode, ok := c.getInodeById(id)
-	if !ok {
-		panic(fmt.Sprintf("Unknown inode: %v", id))
-	}
-	return inode
 }
 
 func (c *InodeCache) getInodeIdByNsPath(namespace rune, path string) (fuseops.InodeID, bool) {

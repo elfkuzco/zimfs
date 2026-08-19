@@ -74,7 +74,11 @@ func buildZimFile(t *testing.T, entries []testDirEntry) *ZimFile {
 func TestGetEntryLowerBoundEmptyZimFile(t *testing.T) {
 	zf := buildZimFile(t, nil)
 
-	if got := zf.getEntryLowerBound(0, 'A', "foo"); got != 0 {
+	got, err := zf.getEntryLowerBound(0, 'A', "foo")
+	if err != nil {
+		t.Fatalf("GetEntryLowerBound(%q, %q) on empty archive error = %v", 'A', "foo", err)
+	}
+	if got != 0 {
 		t.Fatalf("GetEntryLowerBound(%q, %q) on empty archive = %d, want 0", 'A', "foo", got)
 	}
 }
@@ -105,7 +109,11 @@ func TestGetEntryLowerBound(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := zf.getEntryLowerBound(0, tc.namespace, tc.path); got != tc.want {
+			got, err := zf.getEntryLowerBound(0, tc.namespace, tc.path)
+			if err != nil {
+				t.Fatalf("GetEntryLowerBound(%q, %q) error = %v", tc.namespace, tc.path, err)
+			}
+			if got != tc.want {
 				t.Errorf("GetEntryLowerBound(%q, %q) = %d, want %d", tc.namespace, tc.path, got, tc.want)
 			}
 		})
@@ -134,7 +142,11 @@ func TestGetPathName(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := zf.getPathName(tc.start); got != tc.want {
+			got, err := zf.getPathName(tc.start)
+			if err != nil {
+				t.Fatalf("getPathName(%d) error = %v", tc.start, err)
+			}
+			if got != tc.want {
 				t.Errorf("getPathName(%d) = %q, want %q", tc.start, got, tc.want)
 			}
 		})

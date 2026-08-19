@@ -22,8 +22,9 @@ func newInode(id fuseops.InodeID, attrs fuseops.InodeAttributes, entry zim.ZimEn
 	attrs.Crtime = now
 
 	inode := &inode{
-		id:    id,
-		entry: entry,
+		id:         id,
+		entry:      entry,
+		attributes: attrs,
 	}
 
 	return inode

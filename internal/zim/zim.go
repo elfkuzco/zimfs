@@ -12,15 +12,23 @@ import (
 	"github.com/edsrzf/mmap-go"
 )
 
-func ReadUint16(data []byte, offset uint64) uint16 {
+// fits reports whether the range [offset, offset+n) lies within a buffer of
+// the given length, without risking integer overflow in the offset+n sum.
+func fits(offset, n, length uint64) bool {
+	return offset <= length && n <= length-offset
+}
+
+// readUint16/32/64 read a little-endian integer without bounds checking.
+// Callers must have already validated the range (for example, with fits).
+func readUint16(data []byte, offset uint64) uint16 {
 	return binary.LittleEndian.Uint16(data[offset : offset+2])
 }
 
-func ReadUint32(data []byte, offset uint64) uint32 {
+func readUint32(data []byte, offset uint64) uint32 {
 	return binary.LittleEndian.Uint32(data[offset : offset+4])
 }
 
-func ReadUint64(data []byte, offset uint64) uint64 {
+func readUint64(data []byte, offset uint64) uint64 {
 	return binary.LittleEndian.Uint64(data[offset : offset+8])
 }
 
@@ -35,13 +43,22 @@ type ZimFile struct {
 
 var (
 	EntryDoesNotExist = errors.New("entry does not exist")
-	EntryDeprecated   = errors.New("entry is deprecated")
 	InvalidEntry      = errors.New("cannot perform operation on entry")
+	CorruptData       = errors.New("corrupt or truncated zim data")
 )
+
+// ptrListEnd returns start + count*8, and reports whether the addition
+// overflows uint64. It is used to validate on-disk pointer lists before slicing.
+func ptrListEnd(start uint64, count uint32) (uint64, bool) {
+	size := uint64(count) * 8
+	if start > ^uint64(0)-size {
+		return 0, false
+	}
+	return start + size, true
+}
 
 // Create a Zim FS server and maps the file to memory using mmap.
 func NewZimFile(f *os.File) (*ZimFile, error) {
-	var err error
 	header, err := ReadHeader(f)
 	if err != nil {
 		return nil, err
@@ -72,12 +89,11 @@ func (zf *ZimFile) Close() error {
 // a path "example.com/assets/style.css" but no corresponding path for "example.com/assets".
 // Therefore, callers of this function should verify if entry actually exists using
 // GetDirEntry with the index
-func (zf *ZimFile) getEntryLowerBound(start uint32, namespace rune, path string) uint32 {
-	var low uint32
+func (zf *ZimFile) getEntryLowerBound(start uint32, namespace rune, path string) (uint32, error) {
 	low, high := start, zf.EntryCount
 	var mid uint32
-	var err error
 	var entry ZimEntry
+	var err error
 	target := Entry{
 		Namespace: namespace,
 		Path:      path,
@@ -85,9 +101,8 @@ func (zf *ZimFile) getEntryLowerBound(start uint32, namespace rune, path string)
 	for low < high {
 		mid = (low + high) / 2
 		entry, err = zf.getZimEntry(mid)
-		if err != nil { // DeletedEntry or  LinkTargetEntry?
-			low = mid + 1
-			continue
+		if err != nil {
+			return 0, err
 		}
 		if entry.Get().Compare(&target) < 0 {
 			low = mid + 1
@@ -101,18 +116,24 @@ func (zf *ZimFile) getEntryLowerBound(start uint32, namespace rune, path string)
 		low = zf.EntryCount - 1
 	}
 
-	return low
+	return low, nil
 }
 
 // Get the pathname at offset.
-func (zf *ZimFile) getPathName(start uint64) string {
+func (zf *ZimFile) getPathName(start uint64) (string, error) {
+	length := uint64(len(zf.contents))
+	if start >= length {
+		return "", CorruptData
+	}
 	// Pathnames are zero terminated.
 	end := start
-	length := uint64(len(zf.contents))
 	for end < length && zf.contents[end] != 0 {
 		end++
 	}
-	return string(zf.contents[start:end])
+	if end == length {
+		return "", CorruptData
+	}
+	return string(zf.contents[start:end]), nil
 }
 
 // Get the directory entry located at index
@@ -120,37 +141,79 @@ func (zf *ZimFile) getZimEntry(index uint32) (ZimEntry, error) {
 	if index >= zf.EntryCount {
 		return nil, EntryDoesNotExist
 	}
-	pathList := zf.contents[zf.PathPtrPos : zf.PathPtrPos+uint64(zf.EntryCount)*8]
-	offset := ReadUint64(pathList, uint64(index*8))
-	mimeType := ReadUint16(zf.contents, offset)
 
-	if IsDeletedEntry(mimeType) || IsLinkTargetEntry(mimeType) {
-		return nil, EntryDeprecated
+	pathListEnd, ok := ptrListEnd(zf.PathPtrPos, zf.EntryCount)
+	if !ok || pathListEnd > uint64(len(zf.contents)) {
+		return nil, CorruptData
 	}
+	pathList := zf.contents[zf.PathPtrPos:pathListEnd]
 
-	paramLen := zf.contents[offset+2]
-	ns := zf.contents[offset+3]
-	revision := ReadUint32(zf.contents, offset+4)
+	offset := readUint64(pathList, uint64(index)*8)
+
+	if !fits(offset, 2, uint64(len(zf.contents))) {
+		return nil, CorruptData
+	}
+	mimeType := readUint16(zf.contents, offset)
+
 	if IsRedirectEntry(mimeType) {
+		// Redirect entry header: mimeType(2) + paramLen(1) + ns(1) +
+		// revision(4) + redirectIndex(4) = 12 bytes.
+		if !fits(offset, 12, uint64(len(zf.contents))) {
+			return nil, CorruptData
+		}
+		path, err := zf.getPathName(offset + 12)
+		if err != nil {
+			return nil, err
+		}
 		return NewRedirectEntry(
-			paramLen,
-			rune(ns),
-			revision,
-			zf.getPathName(offset+12),
+			zf.contents[offset+2],
+			rune(zf.contents[offset+3]),
+			readUint32(zf.contents, offset+4),
+			path,
 			index,
-			ReadUint32(zf.contents, offset+8),
+			readUint32(zf.contents, offset+8),
 		), nil
 	}
-	return NewContentEntry(
-		mimeType,
-		paramLen,
-		rune(ns),
-		revision,
-		zf.getPathName(offset+16),
-		index,
-		ReadUint32(zf.contents, offset+8),
-		ReadUint32(zf.contents, offset+12),
-	), nil
+
+	// Content, deleted, and link-target entries share a 16-byte header with the
+	// url at offset 16. Only content entries carry cluster/blob fields.
+	if !fits(offset, 16, uint64(len(zf.contents))) {
+		return nil, CorruptData
+	}
+	path, err := zf.getPathName(offset + 16)
+	if err != nil {
+		return nil, err
+	}
+
+	switch {
+	case IsDeletedEntry(mimeType):
+		return NewDeletedEntry(
+			zf.contents[offset+2],
+			rune(zf.contents[offset+3]),
+			readUint32(zf.contents, offset+4),
+			path,
+			index,
+		), nil
+	case IsLinkTargetEntry(mimeType):
+		return NewLinkTargetEntry(
+			zf.contents[offset+2],
+			rune(zf.contents[offset+3]),
+			readUint32(zf.contents, offset+4),
+			path,
+			index,
+		), nil
+	default:
+		return NewContentEntry(
+			mimeType,
+			zf.contents[offset+2],
+			rune(zf.contents[offset+3]),
+			readUint32(zf.contents, offset+4),
+			path,
+			index,
+			readUint32(zf.contents, offset+8),
+			readUint32(zf.contents, offset+12),
+		), nil
+	}
 }
 
 func (zf *ZimFile) GetZimEntry(namespace rune, path string) (ZimEntry, error) {
@@ -166,12 +229,19 @@ func (zf *ZimFile) GetZimEntryFromStart(start uint32, namespace rune, path strin
 		Namespace: namespace,
 		Path:      path,
 	}
-	lowerBound := zf.getEntryLowerBound(start, namespace, path)
+	lowerBound, err := zf.getEntryLowerBound(start, namespace, path)
+	if err != nil {
+		return nil, err
+	}
 	dirent, err := zf.getZimEntry(lowerBound)
 	if err != nil {
 		return nil, err
 	}
 	entry := dirent.Get()
+	if IsDeletedEntry(entry.MimeType) || IsLinkTargetEntry(entry.MimeType) {
+		// Deprecated entries are hidden from lookup.
+		return nil, EntryDoesNotExist
+	}
 	if entry.Equal(&target) {
 		return dirent, nil
 	} else {
@@ -187,16 +257,32 @@ func (zf *ZimFile) GetZimEntryFromStart(start uint32, namespace rune, path strin
 func (zf *ZimFile) GetOrCreateCluster(entry *ContentEntry) (ClusterReader, error) {
 	zf.mu.Lock()
 	defer zf.mu.Unlock()
-	if zf.clusters[entry.ClusterNumber] == nil {
-		clusterList := zf.contents[zf.ClusterPtrPos : zf.ClusterPtrPos+uint64(zf.ClusterCount)*8]
-		start := ReadUint64(clusterList, uint64(entry.ClusterNumber*8))
-		cluster, err := NewCluster(zf.contents[start:])
-		if err != nil {
-			return nil, err
-		}
-		zf.clusters[entry.ClusterNumber] = cluster
+
+	if entry.ClusterNumber >= zf.ClusterCount {
+		return nil, CorruptData
 	}
-	return zf.clusters[entry.ClusterNumber], nil
+
+	if zf.clusters[entry.ClusterNumber] != nil {
+		return zf.clusters[entry.ClusterNumber], nil
+	}
+
+	clusterListEnd, ok := ptrListEnd(zf.ClusterPtrPos, zf.ClusterCount)
+	if !ok || clusterListEnd > uint64(len(zf.contents)) {
+		return nil, CorruptData
+	}
+	clusterList := zf.contents[zf.ClusterPtrPos:clusterListEnd]
+
+	start := readUint64(clusterList, uint64(entry.ClusterNumber)*8)
+	if start >= uint64(len(zf.contents)) {
+		return nil, CorruptData
+	}
+
+	cluster, err := NewCluster(zf.contents[start:])
+	if err != nil {
+		return nil, err
+	}
+	zf.clusters[entry.ClusterNumber] = cluster
+	return cluster, nil
 }
 
 // Read the contents of a content entry
@@ -245,7 +331,12 @@ func (zf *ZimFile) GetChildren(entry *DirectoryEntry, start uint32) []ZimEntry {
 	children := []ZimEntry{}
 	var child ZimEntry
 	var err error
-	parentPath := entry.Path + "/"
+	var parentPath string
+	if entry.Path == "" { // for root nodes, we don't have any path
+		parentPath = entry.Path
+	} else {
+		parentPath = entry.Path + "/"
+	}
 	// Map needed to ensure we do not add duplicate entries given we want only the
 	// top-level children. For example, if we have:
 	// example.com/index.html, example.com/js/index.js, example.com/js/neuron.js
@@ -254,13 +345,21 @@ func (zf *ZimFile) GetChildren(entry *DirectoryEntry, start uint32) []ZimEntry {
 	for i := entry.Number + start; i < zf.EntryCount; i++ {
 		child, err = zf.getZimEntry(i)
 		// We will never get EntryDoesNotExist errors because index is capped
-		// at EntryCount. But we can skip for the other errors. For now, the only
-		// other error is EntryDeprecated which we don't care about
+		// at EntryCount. But we can skip for the other errors.
 		if err != nil {
+			// Skip corrupt entries during listing; they will fail on access.
 			continue
 		}
 
 		childEntry := child.Get()
+		if IsDeletedEntry(childEntry.MimeType) || IsLinkTargetEntry(childEntry.MimeType) {
+			// Deprecated entries are never listed.
+			continue
+		}
+		if childEntry.Namespace != entry.Namespace {
+			break
+		}
+
 		relativePath, isRelative := strings.CutPrefix(childEntry.Path, parentPath)
 		if !isRelative {
 			break

@@ -38,6 +38,12 @@ const (
 	Extended OffsetSize = 8
 )
 
+// maxOffsetTableSize caps the size of a cluster offset table. Real ZIM clusters
+// hold at most a few thousand blobs, so even a 64 MiB table is orders of
+// magnitude larger than any legitimate archive; the cap only guards against a
+// corrupt stream causing a multi-gigabyte allocation.
+const maxOffsetTableSize = 1 << 26
+
 type Cluster struct {
 	Contents []byte
 }
@@ -57,16 +63,22 @@ func (c *Cluster) GetOffsetSize() OffsetSize {
 	return Normal
 }
 
-func (c *Cluster) ReadOffset(data []byte, size OffsetSize) uint64 {
+// readOffset reads a 4- or 8-byte offset from data without bounds checking.
+// Callers must have already validated len(data) >= size.
+func (c *Cluster) readOffset(data []byte, size OffsetSize) uint64 {
 	if size == Extended {
 		return binary.LittleEndian.Uint64(data)
 	}
 	return uint64(binary.LittleEndian.Uint32(data))
 }
 
-func (c *Cluster) ReadBlobOffset(n uint32, size OffsetSize) uint64 {
-	data := c.Contents[uint64(n-1)*uint64(size)+1:]
-	return c.ReadOffset(data, size)
+func (c *Cluster) readBlobOffset(n uint32, size OffsetSize) (uint64, error) {
+	start := uint64(n)*uint64(size) + 1
+	end := start + uint64(size)
+	if end > uint64(len(c.Contents)) {
+		return 0, CorruptData
+	}
+	return c.readOffset(c.Contents[start:end], size), nil
 }
 
 type ClusterReader interface {
@@ -85,20 +97,43 @@ type UncompressedCluster struct {
 
 // blobRange returns the start and end offsets of blob n in the cluster's
 // offset table.
-func (ucc *UncompressedCluster) blobRange(n uint32) (start, end uint64) {
+func (ucc *UncompressedCluster) blobRange(n uint32) (start, end uint64, err error) {
+	if n == ^uint32(0) {
+		return 0, 0, CorruptData
+	}
 	offsetSize := ucc.GetOffsetSize()
-	return ucc.ReadBlobOffset(n, offsetSize), ucc.ReadBlobOffset(n+1, offsetSize)
+	start, err = ucc.readBlobOffset(n, offsetSize)
+	if err != nil {
+		return 0, 0, err
+	}
+	end, err = ucc.readBlobOffset(n+1, offsetSize)
+	if err != nil {
+		return 0, 0, err
+	}
+	return start, end, nil
 }
 
 func (ucc *UncompressedCluster) GetBlobSize(n uint32) (uint64, error) {
 	// According to the docs, the size of one blob is calculated by the difference
 	// of two consecutive offsets.
-	start, end := ucc.blobRange(n)
+	start, end, err := ucc.blobRange(n)
+	if err != nil {
+		return 0, err
+	}
+	if end < start {
+		return 0, CorruptData
+	}
 	return end - start, nil
 }
 
 func (ucc *UncompressedCluster) GetBlob(n uint32) ([]byte, error) {
-	start, end := ucc.blobRange(n)
+	start, end, err := ucc.blobRange(n)
+	if err != nil {
+		return nil, err
+	}
+	if end < start || end > uint64(len(ucc.Contents)) {
+		return nil, CorruptData
+	}
 	return ucc.Contents[start:end], nil
 }
 
@@ -144,34 +179,33 @@ func (cc *CompressedCluster) readOffsets() ([]uint64, io.ReadCloser, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-
 	offsetSize := cc.GetOffsetSize()
 
 	// The first offset points to the start of the first blob's data, so the
 	// number of offsets is that value divided by the offset size.
 	firstBuf := make([]byte, offsetSize)
 	if _, err = io.ReadFull(r, firstBuf); err != nil {
-		r.Close()
 		return nil, nil, err
 	}
-	firstOffset := cc.ReadOffset(firstBuf, offsetSize)
+	firstOffset := cc.readOffset(firstBuf, offsetSize)
+	if firstOffset > maxOffsetTableSize {
+		return nil, nil, fmt.Errorf("invalid cluster: offset table too large")
+	}
 	nOffsets := firstOffset / uint64(offsetSize)
 	if nOffsets < 2 {
-		r.Close()
 		return nil, nil, fmt.Errorf("invalid cluster: too few offsets")
 	}
 
 	// Read the rest of the offset table.
 	table := make([]byte, firstOffset-uint64(offsetSize))
 	if _, err = io.ReadFull(r, table); err != nil {
-		r.Close()
 		return nil, nil, err
 	}
 
 	offsets := make([]uint64, nOffsets)
 	offsets[0] = firstOffset
 	for i := uint64(1); i < nOffsets; i++ {
-		offsets[i] = cc.ReadOffset(table[(i-1)*uint64(offsetSize):], offsetSize)
+		offsets[i] = cc.readOffset(table[(i-1)*uint64(offsetSize):], offsetSize)
 	}
 
 	return offsets, r, nil
@@ -186,6 +220,9 @@ func (cc *CompressedCluster) GetBlobSize(n uint32) (uint64, error) {
 
 	if uint64(n)+1 >= uint64(len(offsets)) {
 		return 0, fmt.Errorf("blob number %d out of range", n)
+	}
+	if offsets[n+1] < offsets[n] {
+		return 0, CorruptData
 	}
 	return offsets[n+1] - offsets[n], nil
 }
@@ -202,7 +239,14 @@ func (cc *CompressedCluster) GetBlob(n uint32) ([]byte, error) {
 	}
 
 	start := offsets[n]
-	size := offsets[n+1] - start
+	end := offsets[n+1]
+	if end < start || start < offsets[0] {
+		return nil, CorruptData
+	}
+	size := end - start
+	if size > uint64(^uint(0)>>1) {
+		return nil, CorruptData
+	}
 
 	// Skip blobs 0..n-1.
 	if _, err := io.CopyN(io.Discard, r, int64(start-offsets[0])); err != nil {
@@ -218,13 +262,16 @@ func (cc *CompressedCluster) GetBlob(n uint32) ([]byte, error) {
 }
 
 func NewCluster(contents []byte) (ClusterReader, error) {
+	if len(contents) == 0 {
+		return nil, CorruptData
+	}
 	cluster := Cluster{contents}
 	switch compression := cluster.GetCompression(); compression {
 	case None:
 		return &UncompressedCluster{
 			Cluster: &cluster,
 		}, nil
-	case Zstd:
+	case Zstd, Zlib, Bzip2, Lzma2:
 		return &CompressedCluster{
 			Cluster:     &cluster,
 			compression: compression,

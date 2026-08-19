@@ -129,3 +129,27 @@ func NewDirectoryEntry(namespace rune, path string, number uint32) *DirectoryEnt
 		},
 	}
 }
+
+// A deleted entry has been removed from the archive. It still occupies a
+// position in the sorted index but is never visible to callers.
+type DeletedEntry struct {
+	Entry
+}
+
+func NewDeletedEntry(paramLen uint8, namespace rune, revision uint32, path string, number uint32) *DeletedEntry {
+	return &DeletedEntry{
+		Entry: NewEntry(DELETED_ENTRY_MIMETYPE, paramLen, namespace, revision, path, number),
+	}
+}
+
+// A link target entry is the target of a redirect. Like a deleted entry, it is
+// hidden from normal listing/lookup but still participates in index ordering.
+type LinkTargetEntry struct {
+	Entry
+}
+
+func NewLinkTargetEntry(paramLen uint8, namespace rune, revision uint32, path string, number uint32) *LinkTargetEntry {
+	return &LinkTargetEntry{
+		Entry: NewEntry(LINK_TARGET_MIMETYPE, paramLen, namespace, revision, path, number),
+	}
+}

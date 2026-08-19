@@ -2,6 +2,7 @@ package zim
 
 import (
 	"errors"
+	"io"
 	"os"
 
 	"github.com/google/uuid"
@@ -46,14 +47,15 @@ type Header struct {
 // Read and validate header information from ZIM file
 func ReadHeader(file *os.File) (*Header, error) {
 	buffer := make([]byte, ZIM_HEADER_LENGTH)
-	var err error
-
-	_, err = file.ReadAt(buffer, 0)
-	if err != nil {
+	n, err := file.ReadAt(buffer, 0)
+	if err != nil && err != io.EOF {
 		return nil, err
 	}
+	if n != ZIM_HEADER_LENGTH {
+		return nil, InvalidZimHeader
+	}
 
-	magicNumber := ReadUint32(buffer, 0)
+	magicNumber := readUint32(buffer, 0)
 	if magicNumber != ZIM_MAGIC_NUMBER {
 		return nil, InvalidZimHeader
 	}
@@ -62,20 +64,21 @@ func ReadHeader(file *os.File) (*Header, error) {
 	if err != nil {
 		return nil, InvalidZimHeader
 	}
+
 	header := &Header{
 		MagicNumber:   magicNumber,
-		MajorVersion:  ReadUint16(buffer, 4),
-		MinorVersion:  ReadUint16(buffer, 6),
+		MajorVersion:  readUint16(buffer, 4),
+		MinorVersion:  readUint16(buffer, 6),
 		Id:            id,
-		EntryCount:    ReadUint32(buffer, 24),
-		ClusterCount:  ReadUint32(buffer, 28),
-		PathPtrPos:    ReadUint64(buffer, 32),
-		TitlePtrPos:   ReadUint64(buffer, 40),
-		ClusterPtrPos: ReadUint64(buffer, 48),
-		MimeListPos:   ReadUint64(buffer, 56),
-		MainPage:      ReadUint32(buffer, 64),
-		LayoutPage:    ReadUint32(buffer, 68),
-		ChecksumPos:   ReadUint64(buffer, 72),
+		EntryCount:    readUint32(buffer, 24),
+		ClusterCount:  readUint32(buffer, 28),
+		PathPtrPos:    readUint64(buffer, 32),
+		TitlePtrPos:   readUint64(buffer, 40),
+		ClusterPtrPos: readUint64(buffer, 48),
+		MimeListPos:   readUint64(buffer, 56),
+		MainPage:      readUint32(buffer, 64),
+		LayoutPage:    readUint32(buffer, 68),
+		ChecksumPos:   readUint64(buffer, 72),
 	}
 	return header, nil
 }
