@@ -1,9 +1,11 @@
 package zim
 
 import (
+	"bytes"
 	"errors"
 	"os"
 	"strings"
+	"sync"
 
 	"encoding/binary"
 
@@ -26,12 +28,15 @@ type ZimFile struct {
 	*Header
 	contents mmap.MMap
 	fh       *os.File
+	// mutex for restricting access to clusters
+	mu       sync.Mutex
 	clusters []ClusterReader
 }
 
 var (
 	EntryDoesNotExist = errors.New("entry does not exist")
 	EntryDeprecated   = errors.New("entry is deprecated")
+	InvalidEntry      = errors.New("cannot perform operation on entry")
 )
 
 // Create a Zim FS server and maps the file to memory using mmap.
@@ -50,6 +55,7 @@ func NewZimFile(f *os.File) (*ZimFile, error) {
 		header,
 		contents,
 		f,
+		sync.Mutex{},
 		make([]ClusterReader, header.ClusterCount),
 	}, nil
 }
@@ -151,6 +157,10 @@ func (zf *ZimFile) GetZimEntry(namespace rune, path string) (ZimEntry, error) {
 	return zf.GetZimEntryFromStart(0, namespace, path)
 }
 
+func (zf *ZimFile) ResolveRedirect(entry *RedirectEntry) (ZimEntry, error) {
+	return zf.getZimEntry(entry.RedirectIndex)
+}
+
 func (zf *ZimFile) GetZimEntryFromStart(start uint32, namespace rune, path string) (ZimEntry, error) {
 	target := Entry{
 		Namespace: namespace,
@@ -175,6 +185,8 @@ func (zf *ZimFile) GetZimEntryFromStart(start uint32, namespace rune, path strin
 
 // Get or create cluster for entry
 func (zf *ZimFile) GetOrCreateCluster(entry *ContentEntry) (ClusterReader, error) {
+	zf.mu.Lock()
+	defer zf.mu.Unlock()
 	if zf.clusters[entry.ClusterNumber] == nil {
 		clusterList := zf.contents[zf.ClusterPtrPos : zf.ClusterPtrPos+uint64(zf.ClusterCount)*8]
 		start := ReadUint64(clusterList, uint64(entry.ClusterNumber*8))
@@ -185,6 +197,43 @@ func (zf *ZimFile) GetOrCreateCluster(entry *ContentEntry) (ClusterReader, error
 		zf.clusters[entry.ClusterNumber] = cluster
 	}
 	return zf.clusters[entry.ClusterNumber], nil
+}
+
+// Read the contents of a content entry
+func (zf *ZimFile) Read(entry ZimEntry, offset int64, dst []byte) (int, error) {
+	var cluster ClusterReader
+	var contentEntry *ContentEntry
+	var err error
+	switch entry := entry.(type) {
+	case *ContentEntry:
+		contentEntry = entry
+		goto begin
+	case *RedirectEntry:
+		redirect, err := zf.getZimEntry(entry.RedirectIndex)
+		if err != nil {
+			return 0, err
+		}
+		if e, ok := redirect.(*ContentEntry); !ok {
+			return 0, InvalidEntry
+		} else {
+			contentEntry = e
+			goto begin
+		}
+	default:
+		return 0, InvalidEntry
+	}
+
+begin:
+	cluster, err = zf.GetOrCreateCluster(contentEntry)
+	if err != nil {
+		return 0, err
+	}
+	contents, err := cluster.GetBlob(contentEntry.BlobNumber)
+	if err != nil {
+		return 0, err
+	}
+	reader := bytes.NewReader(contents)
+	return reader.ReadAt(dst, offset)
 }
 
 // Get the top-level children of the directory entry

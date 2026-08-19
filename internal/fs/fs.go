@@ -2,10 +2,12 @@ package fs
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/elfkuzco/zimfs/internal/zim"
@@ -259,5 +261,63 @@ func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
 		}
 		op.BytesRead += n
 	}
+	return nil
+}
+
+// Open a file within the filesystem
+func (fs *ZimFS) OpenFile(ctx context.Context, op *fuseops.OpenFileOp) error {
+	if (op.OpenFlags & syscall.O_ACCMODE) != syscall.O_RDONLY {
+		return syscall.EACCES
+	}
+	// We don't mutate spontaneosuly, so if the VFS layer has asked for an
+	// inode that doesn't exist, something screwed up earlier (a lookup, a
+	// cache invalidation, etc.).
+	node, ok := fs.cache.getInodeById(op.Inode)
+	if !ok {
+		return fuse.ENOENT
+	}
+	if node.entry.Get().IsDirectoryEntry() {
+		return syscall.EINVAL
+	}
+	return nil
+}
+
+// Read data from an open file
+func (fs *ZimFS) ReadFile(ctx context.Context, op *fuseops.ReadFileOp) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	node, ok := fs.cache.getInodeById(op.Inode)
+	if !ok {
+		return fuse.ENOENT
+	}
+	var err error
+	op.BytesRead, err = fs.zf.Read(node.entry, op.Offset, op.Dst)
+	// Don't return EOF errors; we just indicate EOF to fuse using a short read.
+	if err == io.EOF {
+		return nil
+	}
+	return err
+}
+
+// Read the target of a symlink inode
+func (fs *ZimFS) ReadSymlink(ctx context.Context, op *fuseops.ReadSymlinkOp) error {
+	fs.mu.Lock()
+	defer fs.mu.Unlock()
+	node, ok := fs.cache.getInodeById(op.Inode)
+	if !ok {
+		return fuse.ENOENT
+	}
+
+	if !node.entry.Get().IsRedirectEntry() {
+		return syscall.EINVAL
+	}
+	redirect := node.entry.(*zim.RedirectEntry)
+	target, err := fs.zf.ResolveRedirect(redirect)
+	if err != nil {
+		return fuse.ENOENT
+	}
+
+	op.Target = target.Get().Path
+
 	return nil
 }
