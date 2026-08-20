@@ -1,36 +1,52 @@
 package main
 
 import (
-	"log/slog"
+	"context"
+	"log"
 	"os"
+
+	"github.com/elfkuzco/zimfs/internal/fs"
+	"github.com/jacobsa/fuse"
 )
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
-	// zimfs doesn't do any access checking on its own (the comment
-	// blocks in fuse.h mention some of the functions that need
-	// accesses checked -- but note there are other functions, like
-	// chown(), that also need checking!).  Since running zimfs as
-	// root will therefore open Metrodome-sized holes in the system
-	// security, we'll check if root is trying to mount the
-	// filesystem and refuse if it is.
+	debugLog := log.New(os.Stdout, "DEBUG\t", log.Ldate|log.Ltime)
+	errorLog := log.New(os.Stderr, "ERROR\t", log.Ldate|log.Ltime|log.Lshortfile)
+
+	// zimfs does not do its own access checking, so running as root would open
+	// security holes. Refuse to mount as root.
 	if (os.Getuid() == 0) || (os.Geteuid() == 0) {
-		logger.Error(
-			"Running zimfs as root opens unnacceptable security holes\n",
-		)
-		os.Exit(1)
+		errorLog.Fatalln("running zimfs as root opens unacceptable security holes")
 	}
 
-	// Perform some sanity checking on the command line:  make sure
-	// there are enough arguments, and that neither of the last two
-	// start with a hyphen (this will break if you actually have a
-	// rootpoint or mountpoint whose name starts with a hyphen, but
-	// so will a zillion other programs)
-	argc := len(os.Args)
-	if (argc < 3) || (os.Args[argc-2][0] == '-') ||
-		(os.Args[argc-1][0] == '-') {
-		// zimfsUsage();
-		os.Exit(1)
+	if len(os.Args) < 3 {
+		errorLog.Fatalln("usage: zimfs <file.zim> <mountpoint>")
 	}
 
+	zimPath := os.Args[len(os.Args)-2]
+	mountpoint := os.Args[len(os.Args)-1]
+
+	f, err := os.Open(zimPath)
+	if err != nil {
+		errorLog.Fatalf("failed to open zim file at path %s: %v\n", zimPath, err)
+	}
+	defer f.Close()
+
+	server, err := fs.NewZimFS(f)
+	if err != nil {
+		errorLog.Fatalf("failed to create filesystem: %v\n", err)
+	}
+
+	mfs, err := fuse.Mount(mountpoint, server, &fuse.MountConfig{
+		FSName:      "zimfs",
+		ErrorLogger: errorLog,
+		DebugLogger: debugLog,
+	})
+	if err != nil {
+		errorLog.Fatalf("failed to mount at %s: %v\n", mountpoint, err)
+	}
+
+	if err := mfs.Join(context.Background()); err != nil {
+		errorLog.Fatalf("mount ended with error: %v", err)
+	}
 }

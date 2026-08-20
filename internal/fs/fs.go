@@ -29,7 +29,7 @@ type ZimFS struct {
 	nextInodeID atomic.Uint64
 }
 
-func NewZimFS(f *os.File) (*fuse.Server, error) {
+func NewZimFS(f *os.File) (fuse.Server, error) {
 	zf, err := zim.NewZimFile(f)
 	if err != nil {
 		return nil, err
@@ -59,7 +59,7 @@ func NewZimFS(f *os.File) (*fuse.Server, error) {
 	fs.cache.addInode(rootInode)
 
 	server := fuseutil.NewFileSystemServer(fs)
-	return &server, nil
+	return server, nil
 }
 
 func (fs *ZimFS) allocateInodeId() fuseops.InodeID {
@@ -104,11 +104,11 @@ func (fs *ZimFS) mapError(err error) error {
 // Get the mode of the ZIM entry
 func (fs *ZimFS) getMode(entry *zim.Entry) os.FileMode {
 	if entry.IsDirectoryEntry() {
-		return 0500 | os.ModeDir
+		return 0555 | os.ModeDir
 	} else if entry.IsRedirectEntry() {
 		return 0777 | os.ModeSymlink
 	} else {
-		return 0400
+		return 0444
 	}
 }
 
@@ -208,8 +208,10 @@ func (fs *ZimFS) ForgetInode(ctx context.Context, op *fuseops.ForgetInodeOp) err
 // Return the attributes for an already-known inode, computing them lazily if the
 // inode was only created during ReadDir.
 func (fs *ZimFS) GetInodeAttributes(ctx context.Context, op *fuseops.GetInodeAttributesOp) error {
+	fs.logger.Debug("fetching inode attributes", "inodeId", op.Inode)
 	attrs, ok := fs.materializeInode(op.Inode)
 	if !ok {
+		fs.logger.Debug("could not fetch inode attributes", "inodeId", op.Inode)
 		return fuse.ENOENT
 	}
 
