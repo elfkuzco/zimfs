@@ -33,8 +33,8 @@ type ZimFS struct {
 	Gid uint32
 }
 
-func NewZimFS(f *os.File) (fuse.Server, error) {
-	zf, err := zim.NewZimFile(f)
+func NewZimFS(data []byte) (fuse.Server, error) {
+	zf, err := zim.NewZimFile(data)
 	if err != nil {
 		return nil, err
 	}
@@ -52,7 +52,6 @@ func NewZimFS(f *os.File) (fuse.Server, error) {
 	startIndex, err := zf.FirstIndexInNamespace('C')
 	if err != nil {
 		logger.Error("could not find any entries in C namesapce")
-		zf.Close()
 		return nil, err
 	}
 
@@ -91,10 +90,6 @@ func (fs *ZimFS) materializeInode(id fuseops.InodeID) (fuseops.InodeAttributes, 
 		logger.Debug("could not materialize attributes for missing inode", "inodeId", id)
 	}
 	return attrs, matrerlized
-}
-
-func (fs *ZimFS) Destroy() {
-	fs.zf.Close()
 }
 
 // mapError translates zim-layer errors into the appropriate FUSE errno.

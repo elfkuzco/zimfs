@@ -131,14 +131,19 @@ func (c *InodeCache) materialize(id fuseops.InodeID, compute func(*inode) fuseop
 	attrs := compute(inode)
 
 	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	// The inode may have been evicted while compute ran without the lock.
+	inode, ok = c.inodes[id]
+	if !ok {
+		return attrs, false
+	}
 	if !inode.materialized {
 		inode.attributes = attrs
 		inode.materialized = true
 	}
 	c.lru.MoveToFront(inode.lruElement)
-	result := inode.attributes
-	c.mu.Unlock()
-	return result, true
+	return inode.attributes, true
 }
 
 // forgetInode decrements the inode's reference count by n and evicts it once it

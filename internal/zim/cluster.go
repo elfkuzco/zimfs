@@ -136,7 +136,18 @@ type UncompressedCluster struct {
 func (ucc *UncompressedCluster) getData() (clusterData, error) {
 	offsetSize := ucc.GetOffsetSize()
 
+	// The info byte at Contents[0] plus at least one full offset must be present
+	// before we can read firstOffset.
+	if uint64(len(ucc.Contents)) < 1+uint64(offsetSize) {
+		logger.Error("cluster too small for offset table")
+		return clusterData{}, CorruptData
+	}
+
 	firstOffset := ucc.readOffset(ucc.Contents[1:], offsetSize)
+	if firstOffset > maxOffsetTableSize {
+		logger.Error("offset table too large")
+		return clusterData{}, CorruptData
+	}
 	nOffsets := firstOffset / uint64(offsetSize)
 	if nOffsets < 2 {
 		logger.Error("too few offsets in cluster")
@@ -145,6 +156,14 @@ func (ucc *UncompressedCluster) getData() (clusterData, error) {
 	if firstOffset%uint64(offsetSize) != 0 {
 		return clusterData{}, CorruptData
 	}
+
+	// The full offset table must lie within Contents[1:], otherwise reading each
+	// offset below would slice past the end of the buffer.
+	if uint64(len(ucc.Contents)) < 1+nOffsets*uint64(offsetSize) {
+		logger.Error("offset table exceeds cluster size")
+		return clusterData{}, CorruptData
+	}
+
 	offsets := make([]uint64, nOffsets)
 	for i := range offsets {
 		offsets[i] = ucc.readOffset(ucc.Contents[1+uint64(i)*uint64(offsetSize):],

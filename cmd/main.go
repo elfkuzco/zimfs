@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 
+	"github.com/edsrzf/mmap-go"
 	"github.com/elfkuzco/zimfs/internal/fs"
 	"github.com/jacobsa/fuse"
 )
@@ -34,7 +35,13 @@ func main() {
 	}
 	defer f.Close()
 
-	server, err := fs.NewZimFS(f)
+	mapped, err := mmap.Map(f, mmap.RDONLY, 0)
+	if err != nil {
+		errorLog.Fatalf("failed to mmap zim file at path %s: %v\n", zimPath, err)
+	}
+	defer mapped.Unmap()
+
+	server, err := fs.NewZimFS(mapped)
 	if err != nil {
 		errorLog.Fatalf("failed to create filesystem: %v\n", err)
 	}

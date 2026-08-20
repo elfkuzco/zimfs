@@ -4,13 +4,10 @@ import (
 	"bytes"
 	"errors"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 
 	"encoding/binary"
-
-	"github.com/edsrzf/mmap-go"
 )
 
 var logger = slog.Default()
@@ -37,10 +34,9 @@ func readUint64(data []byte, offset uint64) uint64 {
 
 type ZimFile struct {
 	*Header
-	contents mmap.MMap
+	contents []byte
 	// length of the contents slice
 	length uint64
-	fh     *os.File
 	// mutex for restricting access to clusters
 	mu       sync.Mutex
 	clusters []ClusterReader
@@ -65,30 +61,21 @@ func ptrListEnd(start uint64, count uint32) (uint64, bool) {
 	return start + size, true
 }
 
-// Create a Zim FS server and maps the file to memory using mmap.
-func NewZimFile(f *os.File) (*ZimFile, error) {
-	header, err := ReadHeader(f)
-	if err != nil {
-		return nil, err
-	}
-	contents, err := mmap.Map(f, mmap.RDONLY, 0)
+// NewZimFile creates a ZimFile backed by the given bytes. The caller is
+// responsible for the lifetime of data
+func NewZimFile(data []byte) (*ZimFile, error) {
+	header, err := parseHeader(data)
 	if err != nil {
 		return nil, err
 	}
 
 	return &ZimFile{
 		Header:   header,
-		contents: contents,
-		length:   uint64(len(contents)),
-		fh:       f,
+		contents: data,
+		length:   uint64(len(data)),
 		clusters: make([]ClusterReader, header.ClusterCount),
 		cache:    newClusterCache(MAX_CLUSTER_CACHE_SIZE),
 	}, nil
-}
-
-// Close the zim file held in memory. The associated file handler is not closed.
-func (zf *ZimFile) Close() error {
-	return zf.contents.Unmap()
 }
 
 // Return the first index i >= start such that the entry at i sorts
@@ -189,7 +176,7 @@ func (zf *ZimFile) getZimEntry(index uint32) (ZimEntry, error) {
 	if IsRedirectEntry(mimeType) {
 		// Redirect entry header: mimeType(2) + paramLen(1) + ns(1) +
 		// revision(4) + redirectIndex(4) = 12 bytes.
-		if !fits(offset, 12, uint64(len(zf.contents))) {
+		if !fits(offset, 12, zf.length) {
 			logger.Error("entry does not have space for reading contents")
 			return nil, CorruptData
 		}
@@ -209,7 +196,7 @@ func (zf *ZimFile) getZimEntry(index uint32) (ZimEntry, error) {
 
 	// Content, deleted, and link-target entries share a 16-byte header with the
 	// url at offset 16. Only content entries carry cluster/blob fields.
-	if !fits(offset, 16, uint64(len(zf.contents))) {
+	if !fits(offset, 16, zf.length) {
 		logger.Error("entry does not have space for reading contents")
 		return nil, CorruptData
 	}
@@ -257,13 +244,13 @@ func (zf *ZimFile) readDirentInfo(index uint32) (uint16, rune, []byte, error) {
 	}
 
 	pathListEnd, ok := ptrListEnd(zf.PathPtrPos, zf.EntryCount)
-	if !ok || pathListEnd > uint64(len(zf.contents)) {
+	if !ok || pathListEnd > zf.length {
 		return 0, 0, nil, CorruptData
 	}
 	pathList := zf.contents[zf.PathPtrPos:pathListEnd]
 
 	offset := readUint64(pathList, uint64(index)*8)
-	if !fits(offset, 4, uint64(len(zf.contents))) {
+	if !fits(offset, 4, zf.length) {
 		return 0, 0, nil, CorruptData
 	}
 	mimeType := readUint16(zf.contents, offset)

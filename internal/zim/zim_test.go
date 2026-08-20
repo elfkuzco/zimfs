@@ -5,8 +5,6 @@ import (
 	"encoding/binary"
 	"sort"
 	"testing"
-
-	"github.com/edsrzf/mmap-go"
 )
 
 // testDirEntry describes a single directory entry used to build a synthetic
@@ -67,7 +65,8 @@ func buildZimFile(t *testing.T, entries []testDirEntry) *ZimFile {
 			EntryCount: uint32(len(entries)),
 			PathPtrPos: pathPtrPos,
 		},
-		contents: mmap.MMap(buf.Bytes()),
+		contents: buf.Bytes(),
+		length:   uint64(buf.Len()),
 	}
 }
 
@@ -129,7 +128,7 @@ func TestGetPathName(t *testing.T) {
 	buf.WriteString("example.com/assets/style.css")
 	buf.WriteByte(0)
 
-	zf := &ZimFile{contents: mmap.MMap(buf.Bytes())}
+	zf := &ZimFile{contents: buf.Bytes(), length: uint64(buf.Len())}
 
 	tests := []struct {
 		name  string

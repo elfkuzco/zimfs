@@ -55,6 +55,16 @@ func ReadHeader(file *os.File) (*Header, error) {
 		return nil, InvalidZimHeader
 	}
 
+	return parseHeader(buffer)
+}
+
+// Validate and decode a ZIM header from the first 80 bytes of an
+// archive
+func parseHeader(buffer []byte) (*Header, error) {
+	if len(buffer) < ZIM_HEADER_LENGTH {
+		return nil, InvalidZimHeader
+	}
+
 	magicNumber := readUint32(buffer, 0)
 	if magicNumber != ZIM_MAGIC_NUMBER {
 		return nil, InvalidZimHeader
