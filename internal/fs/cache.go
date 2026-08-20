@@ -76,7 +76,7 @@ func (c *InodeCache) getInodeByNsPath(namespace rune, path string, lookup bool) 
 	return inode, true
 }
 
-// getOrAddInode returns the inode for namespace+path, inserting a newly built one
+// Returns the inode for namespace+path, inserting a newly built one
 // if needed. When lookup is true the returned inode's lookup count is incremented
 // atomically with the insertion.
 func (c *InodeCache) getOrAddInode(namespace rune, path string, entry zim.ZimEntry, allocate func() fuseops.InodeID, lookup bool) *inode {
@@ -111,7 +111,7 @@ func (c *InodeCache) getOrAddInode(namespace rune, path string, entry zim.ZimEnt
 	return inode
 }
 
-// materialize returns the inode's attributes, computing them via compute if the
+// Returns the inode's attributes, computing them via compute if the
 // inode has not yet been materialized.
 func (c *InodeCache) materialize(id fuseops.InodeID, compute func(*inode) fuseops.InodeAttributes) (fuseops.InodeAttributes, bool) {
 	c.mu.Lock()
@@ -161,6 +161,7 @@ func (c *InodeCache) forgetInode(id fuseops.InodeID, n uint64) {
 	}
 }
 
+// Remove an inode from the cache. Assumes the lock is held by caller
 func (c *InodeCache) removeLocked(id fuseops.InodeID, inode *inode) {
 	entry := inode.entry.Get()
 	delete(c.inodes, id)
@@ -173,6 +174,7 @@ func (c *InodeCache) removeLocked(id fuseops.InodeID, inode *inode) {
 
 // evictLocked removes unreferenced, least-recently-used inodes until the cache is
 // within its limit. Referenced inodes and the root inode are never evicted.
+// Assumes lock is held by caller.
 func (c *InodeCache) evictLocked() {
 	for len(c.inodes) > c.maxInodes {
 		el := c.lru.Back()

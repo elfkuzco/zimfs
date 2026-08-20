@@ -45,8 +45,44 @@ const (
 // corrupt stream causing a multi-gigabyte allocation.
 const maxOffsetTableSize = 1 << 26
 
+// uncompressed cluster data without leading byte for cluster information
+type clusterData struct {
+	offsets []uint64
+	blobs   []byte
+}
+
+// size of the cluster data
+func (c *clusterData) Size() uint64 {
+	return uint64(len(c.blobs)) + uint64(len(c.offsets))*8
+}
+
+// size of the blob at n
+func (c *clusterData) BlobSize(n uint32) (uint64, error) {
+	if uint64(n)+1 >= uint64(len(c.offsets)) {
+		return 0, fmt.Errorf("blob number %d out of range", n)
+	}
+	if c.offsets[n+1] < c.offsets[n] {
+		return 0, CorruptData
+	}
+	return c.offsets[n+1] - c.offsets[n], nil
+}
+
+func (c *clusterData) Blob(n uint32) ([]byte, error) {
+	if uint64(n)+1 >= uint64(len(c.offsets)) {
+		return nil, fmt.Errorf("blob number %d out of range", n)
+	}
+
+	base := c.offsets[0]
+	start := c.offsets[n]
+	end := c.offsets[n+1]
+	if start < base || end < start || end-base > uint64(len(c.blobs)) {
+		return nil, CorruptData
+	}
+	return c.blobs[start-base : end-base], nil
+}
+
 type Cluster struct {
-	Contents []byte
+	Contents []byte // full data including info byte
 }
 
 func (c *Cluster) GetCompression() Compression {
@@ -94,53 +130,49 @@ type ClusterReader interface {
 
 type UncompressedCluster struct {
 	*Cluster
+	compression Compression
 }
 
-// blobRange returns the start and end offsets of blob n in the cluster's
-// offset table.
-func (ucc *UncompressedCluster) blobRange(n uint32) (start, end uint64, err error) {
-	if n == ^uint32(0) {
-		return 0, 0, CorruptData
-	}
+func (ucc *UncompressedCluster) getData() (clusterData, error) {
 	offsetSize := ucc.GetOffsetSize()
-	start, err = ucc.readBlobOffset(n, offsetSize)
-	if err != nil {
-		return 0, 0, err
+
+	firstOffset := ucc.readOffset(ucc.Contents[1:], offsetSize)
+	nOffsets := firstOffset / uint64(offsetSize)
+	if nOffsets < 2 {
+		logger.Error("too few offsets in cluster")
+		return clusterData{}, CorruptData
 	}
-	end, err = ucc.readBlobOffset(n+1, offsetSize)
-	if err != nil {
-		return 0, 0, err
+	if firstOffset%uint64(offsetSize) != 0 {
+		return clusterData{}, CorruptData
 	}
-	return start, end, nil
+	offsets := make([]uint64, nOffsets)
+	for i := range offsets {
+		offsets[i] = ucc.readOffset(ucc.Contents[1+uint64(i)*uint64(offsetSize):],
+			offsetSize,
+		)
+	}
+	base := offsets[0]
+	return clusterData{offsets: offsets, blobs: ucc.Contents[1+base:]}, nil
 }
 
 func (ucc *UncompressedCluster) GetBlobSize(n uint32) (uint64, error) {
-	// According to the docs, the size of one blob is calculated by the difference
-	// of two consecutive offsets.
-	start, end, err := ucc.blobRange(n)
+	data, err := ucc.getData()
 	if err != nil {
 		return 0, err
 	}
-	if end < start {
-		return 0, CorruptData
-	}
-	return end - start, nil
+	return data.BlobSize(n)
 }
 
 func (ucc *UncompressedCluster) GetBlob(n uint32) ([]byte, error) {
-	start, end, err := ucc.blobRange(n)
+	data, err := ucc.getData()
 	if err != nil {
 		return nil, err
 	}
-	if end < start || end > uint64(len(ucc.Contents)) {
-		return nil, CorruptData
-	}
-	return ucc.Contents[start:end], nil
+	return data.Blob(n)
 }
 
 type CompressedCluster struct {
 	*Cluster
-	compression Compression
 
 	clusterNumber uint32
 	cache         *clusterCache
@@ -149,8 +181,9 @@ type CompressedCluster struct {
 }
 
 func (cc *CompressedCluster) newReader() (io.ReadCloser, error) {
+	// the contents start from 1. Data at 0 just stores the cluster information
 	contents := bytes.NewReader(cc.Contents[1:])
-	switch cc.compression {
+	switch compression := cc.GetCompression(); compression {
 	case Zstd:
 		decoder, err := zstd.NewReader(contents)
 		if err != nil {
@@ -195,11 +228,17 @@ func (cc *CompressedCluster) readOffsets() ([]uint64, io.ReadCloser, error) {
 	}
 	firstOffset := cc.readOffset(firstBuf, offsetSize)
 	if firstOffset > maxOffsetTableSize {
-		return nil, nil, fmt.Errorf("invalid cluster: offset table too large")
+		logger.Error("offset table too large")
+		return nil, nil, CorruptData
 	}
 	nOffsets := firstOffset / uint64(offsetSize)
 	if nOffsets < 2 {
-		return nil, nil, fmt.Errorf("invalid cluster: too few offsets")
+		logger.Error("too few offsets in cluster")
+		return nil, nil, CorruptData
+	}
+
+	if firstOffset%uint64(offsetSize) != 0 {
+		return nil, nil, CorruptData
 	}
 
 	// Read the rest of the offset table.
@@ -245,7 +284,7 @@ func (cc *CompressedCluster) decompress() (clusterData, error) {
 
 // return the cluster's decompressed data, decompressing it at
 // most once per cluster and storing the result in the shared bounded cache.
-func (cc *CompressedCluster) getDecompressed() (clusterData, error) {
+func (cc *CompressedCluster) getData() (clusterData, error) {
 	if data, ok := cc.cache.get(cc.clusterNumber); ok {
 		return data, nil
 	}
@@ -267,37 +306,19 @@ func (cc *CompressedCluster) getDecompressed() (clusterData, error) {
 }
 
 func (cc *CompressedCluster) GetBlobSize(n uint32) (uint64, error) {
-	data, err := cc.getDecompressed()
+	data, err := cc.getData()
 	if err != nil {
 		return 0, err
 	}
-
-	if uint64(n)+1 >= uint64(len(data.offsets)) {
-		return 0, fmt.Errorf("blob number %d out of range", n)
-	}
-	if data.offsets[n+1] < data.offsets[n] {
-		return 0, CorruptData
-	}
-	return data.offsets[n+1] - data.offsets[n], nil
+	return data.BlobSize(n)
 }
 
 func (cc *CompressedCluster) GetBlob(n uint32) ([]byte, error) {
-	data, err := cc.getDecompressed()
+	data, err := cc.getData()
 	if err != nil {
 		return nil, err
 	}
-
-	if uint64(n)+1 >= uint64(len(data.offsets)) {
-		return nil, fmt.Errorf("blob number %d out of range", n)
-	}
-
-	base := data.offsets[0]
-	start := data.offsets[n]
-	end := data.offsets[n+1]
-	if start < base || end < start || end-base > uint64(len(data.blobs)) {
-		return nil, CorruptData
-	}
-	return data.blobs[start-base : end-base], nil
+	return data.Blob(n)
 }
 
 func NewCluster(contents []byte) (ClusterReader, error) {
@@ -310,12 +331,12 @@ func NewCluster(contents []byte) (ClusterReader, error) {
 		return &UncompressedCluster{
 			Cluster: &cluster,
 		}, nil
-	case Zstd, Zlib, Bzip2, Lzma2:
+	case Zlib, Bzip2, Lzma2, Zstd:
 		return &CompressedCluster{
-			Cluster:     &cluster,
-			compression: compression,
+			Cluster: &cluster,
 		}, nil
 	default:
+		logger.Error("no cluster registered", "compression", compression)
 		return nil, UnregisteredCompression
 	}
 }

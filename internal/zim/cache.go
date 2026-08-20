@@ -7,15 +7,6 @@ import (
 
 const MAX_CLUSTER_CACHE_SIZE = 64 << 20 // 64Mb
 
-type clusterData struct {
-	offsets []uint64
-	blobs   []byte
-}
-
-func (c *clusterData) size() uint64 {
-	return uint64(len(c.blobs)) + uint64(len(c.offsets))*8
-}
-
 // Bounded LRU cache of cluster data, keyed by cluster number
 type clusterCache struct {
 	mu       sync.Mutex
@@ -57,9 +48,9 @@ func (c *clusterCache) put(clusterNumber uint32, data clusterData) {
 
 	if el, ok := c.entries[clusterNumber]; ok {
 		entry := el.Value.(*clusterCacheEntry)
-		c.curBytes -= entry.data.size()
+		c.curBytes -= entry.data.Size()
 		entry.data = data
-		c.curBytes += data.size()
+		c.curBytes += data.Size()
 		c.lru.MoveToFront(el)
 		c.evictLocked()
 		return
@@ -68,7 +59,7 @@ func (c *clusterCache) put(clusterNumber uint32, data clusterData) {
 	entry := &clusterCacheEntry{clusterNumber: clusterNumber, data: data}
 	el := c.lru.PushFront(entry)
 	c.entries[clusterNumber] = el
-	c.curBytes += data.size()
+	c.curBytes += data.Size()
 	c.evictLocked()
 }
 
@@ -83,6 +74,6 @@ func (c *clusterCache) evictLocked() {
 		entry := el.Value.(*clusterCacheEntry)
 		c.lru.Remove(el)
 		delete(c.entries, entry.clusterNumber)
-		c.curBytes -= entry.data.size()
+		c.curBytes -= entry.data.Size()
 	}
 }
