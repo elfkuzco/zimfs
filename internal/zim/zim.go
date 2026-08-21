@@ -88,7 +88,7 @@ func (zf *ZimFile) lowerBound(start uint32, namespace rune, path string) (uint32
 	}
 	for low < high {
 		mid := (low + high) / 2
-		entry, err := zf.getZimEntry(mid)
+		entry, err := zf.GetZimEntryAtIndex(mid)
 		if err != nil {
 			return 0, err
 		}
@@ -152,7 +152,7 @@ func (zf *ZimFile) getPathName(start uint64) (string, error) {
 }
 
 // Get the directory entry located at index
-func (zf *ZimFile) getZimEntry(index uint32) (ZimEntry, error) {
+func (zf *ZimFile) GetZimEntryAtIndex(index uint32) (ZimEntry, error) {
 	if index >= zf.EntryCount {
 		logger.Error("index is greater than entry count", "index", index, "entryCount", zf.EntryCount)
 		return nil, EntryDoesNotExist
@@ -272,7 +272,7 @@ func (zf *ZimFile) GetZimEntry(namespace rune, path string) (ZimEntry, error) {
 }
 
 func (zf *ZimFile) ResolveRedirect(entry *RedirectEntry) (ZimEntry, error) {
-	return zf.getZimEntry(entry.RedirectIndex)
+	return zf.GetZimEntryAtIndex(entry.RedirectIndex)
 }
 
 func (zf *ZimFile) GetZimEntryFromStart(start uint32, namespace rune, path string) (ZimEntry, error) {
@@ -284,7 +284,7 @@ func (zf *ZimFile) GetZimEntryFromStart(start uint32, namespace rune, path strin
 	if err != nil {
 		return nil, err
 	}
-	dirent, err := zf.getZimEntry(lowerBound)
+	dirent, err := zf.GetZimEntryAtIndex(lowerBound)
 	if err != nil {
 		return nil, err
 	}
@@ -363,7 +363,7 @@ func (zf *ZimFile) Read(entry ZimEntry, offset int64, dst []byte) (int, error) {
 		contentEntry = entry
 		goto begin
 	case *RedirectEntry:
-		redirect, err := zf.getZimEntry(entry.RedirectIndex)
+		redirect, err := zf.GetZimEntryAtIndex(entry.RedirectIndex)
 		if err != nil {
 			logger.Error("could not find entry from redirect index",
 				"redirectIndex", entry.RedirectIndex,
@@ -473,7 +473,7 @@ func (zf *ZimFile) NextChild(dir *DirectoryEntry, startIndex uint32) (ZimEntry, 
 		if isDir {
 			child = NewDirectoryEntry(namespace, string(parentPath)+string(name), i)
 		} else {
-			child, err = zf.getZimEntry(i)
+			child, err = zf.GetZimEntryAtIndex(i)
 			if err != nil {
 				continue
 			}

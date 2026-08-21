@@ -8,7 +8,7 @@ import (
 	"github.com/jacobsa/fuse/fuseops"
 )
 
-const defaultMaxInodes = 1_000
+const defaultMaxInodes = 10_000
 
 type pathKey struct {
 	namespace rune
