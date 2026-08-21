@@ -53,3 +53,27 @@ func TestGetMode(t *testing.T) {
 		})
 	}
 }
+
+func TestBuildRelativePath(t *testing.T) {
+	f := &ZimFS{}
+
+	tests := []struct {
+		name   string
+		source string
+		target string
+		want   string
+	}{
+		{"fills source directory with dot", "a/b/c.txt", "d/e/f.txt", "../../d/e/f.txt"},
+		{"empty source", "", "d/e/f.txt", "d/e/f.txt"},
+		{"file in root directory", "e.txt", "f.txt", "f.txt"},
+		{"file in same non-root directory", "a/b/c.txt", "a/b/d.txt", "../../a/b/d.txt"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := f.buildRelativePath(tc.source, tc.target); got != tc.want {
+				t.Errorf("buildRelativePath(%s, %s) = %s, want %s", tc.source, tc.target, got, tc.want)
+			}
+		})
+	}
+}

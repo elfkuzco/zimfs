@@ -335,7 +335,7 @@ func (zf *ZimFile) GetOrCreateCluster(entry *ContentEntry) (ClusterReader, error
 		return nil, CorruptData
 	}
 
-	logger.Info("creating new cluster", "clusterNumber", entry.ClusterNumber,
+	logger.Debug("creating new cluster", "clusterNumber", entry.ClusterNumber,
 		"start", start,
 	)
 

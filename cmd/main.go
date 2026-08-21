@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"log"
-	"log/slog"
 	"os"
 
 	"github.com/edsrzf/mmap-go"
@@ -14,7 +13,6 @@ import (
 func main() {
 	debugLog := log.New(os.Stdout, "DEBUG\t", log.Ldate|log.Ltime)
 	errorLog := log.New(os.Stderr, "ERROR\t", log.Ldate|log.Ltime|log.Lshortfile)
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	// zimfs does not do its own access checking, so running as root would open
 	// security holes. Refuse to mount as root.
@@ -50,6 +48,7 @@ func main() {
 		FSName:      "zimfs",
 		ErrorLogger: errorLog,
 		DebugLogger: debugLog,
+		ReadOnly:    true,
 	})
 	if err != nil {
 		errorLog.Fatalf("failed to mount at %s: %v\n", mountpoint, err)

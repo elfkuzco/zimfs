@@ -265,13 +265,15 @@ func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
 	dirent := node.entry.(*zim.DirectoryEntry)
 	startIndex := dirent.Number + uint32(op.Offset)
 
+	logger.Debug("reading directory entries", "directory", dirent.Path, "offset", op.Offset)
+
 	for {
 		child, nextIndex, found, err := fs.zf.NextChild(dirent, startIndex)
 		if err != nil {
 			return fs.mapError(err)
 		}
 		if !found {
-			logger.Info("reached end of directory")
+			logger.Debug("reached end of directory")
 			break
 		}
 
@@ -336,6 +338,27 @@ func (fs *ZimFS) ReadFile(ctx context.Context, op *fuseops.ReadFileOp) error {
 	return fs.mapError(err)
 }
 
+// Build the relative path to target from source. Assumes both are absolute path.
+func (fs *ZimFS) buildRelativePath(source, target string) string {
+	// Since we always get the full paths, the source tells how far we are away from the
+	// root. Calculate the depth of the source directory and append the rest of target as
+	// it is
+	if source == "" {
+		return target
+	}
+	sourceParts := strings.Split(source, "/")
+	if len(sourceParts) == 1 {
+		return target
+	}
+	depth := len(sourceParts) - 1
+	var b strings.Builder
+	for range depth {
+		b.WriteString("..")
+		b.WriteString("/")
+	}
+	return b.String() + target
+}
+
 // Read the target of a symlink inode
 func (fs *ZimFS) ReadSymlink(ctx context.Context, op *fuseops.ReadSymlinkOp) error {
 	node, ok := fs.cache.getInodeById(op.Inode)
@@ -353,7 +376,7 @@ func (fs *ZimFS) ReadSymlink(ctx context.Context, op *fuseops.ReadSymlinkOp) err
 		return fs.mapError(err)
 	}
 
-	op.Target = target.Get().Path
+	op.Target = fs.buildRelativePath(redirect.Path, target.Get().Path)
 
 	return nil
 }
