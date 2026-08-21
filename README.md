@@ -41,7 +41,7 @@ $ ls /mnt/wiki
 
 Requires
 
-- Go 1.26+
+- [Go 1.26+](https://go.dev/doc/install)
 - libfuse2 (install with your package manager)
 
 ```sh
