@@ -79,7 +79,14 @@ func (c *InodeCache) getInodeByNsPath(namespace rune, path string, lookup bool) 
 // Returns the inode for namespace+path, inserting a newly built one
 // if needed. When lookup is true the returned inode's lookup count is incremented
 // atomically with the insertion.
-func (c *InodeCache) getOrAddInode(namespace rune, path string, entry zim.ZimEntry, allocate func() fuseops.InodeID, lookup bool) *inode {
+func (c *InodeCache) getOrAddInode(
+	namespace rune,
+	path string,
+	entry zim.ZimEntry,
+	parent fuseops.InodeID,
+	allocate func() fuseops.InodeID,
+	lookup bool,
+) *inode {
 	key := pathKey{namespace, path}
 
 	c.mu.Lock()
@@ -92,6 +99,9 @@ func (c *InodeCache) getOrAddInode(namespace rune, path string, entry zim.ZimEnt
 				inode.lookedUp = true
 				inode.lookupCount++
 			}
+			if inode.parent == 0 {
+				inode.parent = parent
+			}
 			return inode
 		}
 		// Stale mapping (should not happen since both maps are updated together).
@@ -100,6 +110,7 @@ func (c *InodeCache) getOrAddInode(namespace rune, path string, entry zim.ZimEnt
 
 	id := allocate()
 	inode := newInode(id, entry)
+	inode.parent = parent
 	if lookup {
 		inode.lookedUp = true
 		inode.lookupCount = 1

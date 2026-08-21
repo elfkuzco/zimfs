@@ -36,8 +36,8 @@ func TestGetOrAddInodeDedup(t *testing.T) {
 	alloc := func() fuseops.InodeID { next++; return next }
 
 	e := contentEntry('C', "x/y")
-	a := c.getOrAddInode('C', "x/y", e, alloc, true)
-	b := c.getOrAddInode('C', "x/y", e, alloc, false)
+	a := c.getOrAddInode('C', "x/y", e, 0, alloc, true)
+	b := c.getOrAddInode('C', "x/y", e, 0, alloc, false)
 
 	if a != b {
 		t.Fatalf("getOrAddInode returned distinct inodes for the same path")
@@ -57,9 +57,9 @@ func TestInodeCacheEviction(t *testing.T) {
 	var next fuseops.InodeID = 100
 	alloc := func() fuseops.InodeID { next++; return next }
 
-	c.getOrAddInode('C', "a", contentEntry('C', "a"), alloc, false) // 101
-	c.getOrAddInode('C', "b", contentEntry('C', "b"), alloc, false) // 102
-	c.getOrAddInode('C', "c", contentEntry('C', "c"), alloc, false) // 103, evicts 101
+	c.getOrAddInode('C', "a", contentEntry('C', "a"), 0, alloc, false) // 101
+	c.getOrAddInode('C', "b", contentEntry('C', "b"), 0, alloc, false) // 102
+	c.getOrAddInode('C', "c", contentEntry('C', "c"), 0, alloc, false) // 103, evicts 101
 
 	if _, ok := c.getInodeById(101); ok {
 		t.Errorf("inode 101 should have been evicted")
@@ -74,7 +74,7 @@ func TestForgetInode(t *testing.T) {
 	var next fuseops.InodeID = 100
 	alloc := func() fuseops.InodeID { next++; return next }
 
-	in := c.getOrAddInode('C', "a", contentEntry('C', "a"), alloc, true)
+	in := c.getOrAddInode('C', "a", contentEntry('C', "a"), 0, alloc, true)
 	c.forgetInode(in.id, 1)
 	if _, ok := c.getInodeById(in.id); ok {
 		t.Errorf("inode should be removed after forget")

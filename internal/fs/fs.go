@@ -59,6 +59,7 @@ func NewZimFS(data []byte) (fuse.Server, error) {
 	rootInode := newInode(fuseops.RootInodeID, rootEntry)
 	rootInode.attributes = fs.createInodeAttributes(rootEntry)
 	rootInode.materialized = true
+	rootInode.parent = fuseops.RootInodeID
 	fs.cache.addInode(rootInode)
 	logger.Debug("added root entry to cache", "inodeId", rootInode.id)
 
@@ -70,14 +71,14 @@ func (fs *ZimFS) allocateInodeId() fuseops.InodeID {
 	return fuseops.InodeID(fs.nextInodeID.Add(1))
 }
 
-func (fs *ZimFS) getOrCreateInode(child zim.ZimEntry, lookup bool) *inode {
+func (fs *ZimFS) getOrCreateInode(child zim.ZimEntry, parent fuseops.InodeID, lookup bool) *inode {
 	entry := child.Get()
 
 	if inode, ok := fs.cache.getInodeByNsPath(entry.Namespace, entry.Path, lookup); ok {
 		return inode
 	}
 
-	return fs.cache.getOrAddInode(entry.Namespace, entry.Path, child, fs.allocateInodeId, lookup)
+	return fs.cache.getOrAddInode(entry.Namespace, entry.Path, child, parent, fs.allocateInodeId, lookup)
 }
 
 // materializeInode returns the inode's attributes, computing them lazily (and
@@ -185,7 +186,7 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 		if err != nil {
 			return fs.mapError(err)
 		}
-		child = fs.getOrCreateInode(childEntry, true)
+		child = fs.getOrCreateInode(childEntry, op.Parent, true)
 	}
 
 	attrs, ok := fs.materializeInode(child.id)
@@ -263,8 +264,32 @@ func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
 	}
 
 	dirent := node.entry.(*zim.DirectoryEntry)
-	startIndex := dirent.Number + uint32(op.Offset)
 
+	// Directory offsets are synthetic: 0 starts at ".", 1 starts at "..", and
+	// offsets >= 2 resume into the sorted entry span (index = offset - 2).
+	cursor := uint32(op.Offset)
+
+	// ZIM has no on-disk directories, so "." and ".." are synthesized here
+	if cursor == 0 {
+		entry := fs.makeDirEntry(node.id, ".", fuseutil.DT_Directory, 1)
+		if n := fuseutil.WriteDirent(op.Dst[op.BytesRead:], entry); n == 0 {
+			return nil
+		} else {
+			op.BytesRead += n
+		}
+		cursor = 1
+	}
+	if cursor == 1 {
+		entry := fs.makeDirEntry(node.parent, "..", fuseutil.DT_Directory, 2)
+		if n := fuseutil.WriteDirent(op.Dst[op.BytesRead:], entry); n == 0 {
+			return nil
+		} else {
+			op.BytesRead += n
+		}
+		cursor = 2
+	}
+
+	startIndex := dirent.Number + (cursor - 2)
 	logger.Debug("reading directory entries", "directory", dirent.Path, "offset", op.Offset)
 
 	for {
@@ -288,12 +313,12 @@ func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
 		}
 
 		name, _ := strings.CutPrefix(childEntry.Path, dirent.Path+"/")
-		offset := nextIndex - dirent.Number
+		offset := (nextIndex - dirent.Number) + 2
 
 		// create children inodes but don't materialize their attributes as
 		// that could lead to decompressing cluster data. attributes will be
 		// materialzed in GetInodeAttributes or LookupInode
-		inode := fs.getOrCreateInode(child, false)
+		inode := fs.getOrCreateInode(child, node.id, false)
 		entry := fs.makeDirEntry(inode.id, name, dirType, offset)
 
 		n := fuseutil.WriteDirent(op.Dst[op.BytesRead:], entry)

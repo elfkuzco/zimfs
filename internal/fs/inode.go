@@ -17,6 +17,7 @@ type inode struct {
 	lookupCount  uint64
 	lookedUp     bool
 	lruElement   *list.Element
+	parent       fuseops.InodeID
 }
 
 // newInode creates an unmaterialized inode. Attributes are computed lazily on
