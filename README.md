@@ -19,15 +19,16 @@ Requires
 
 - [Go 1.26+](https://go.dev/doc/install)
 - libfuse2 (install with your package manager)
+- Make (install with your package manager)
 
 ```sh
-go build -o zimfs ./cmd
+make build
 ```
 
 ## Usage
 
 ```sh
-zimfs <file.zim> <mountpoint>
+zimfs -h
 ```
 
 Example:
@@ -35,12 +36,6 @@ Example:
 ```sh
 mkdir -p /mnt/wiki
 zimfs wikipedia_fr_all_maxi.zim /mnt/wiki
-```
-
-Unmount with:
-
-```sh
-fusermount -u /mnt/wiki
 ```
 
 ## Features
