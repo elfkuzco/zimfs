@@ -22,6 +22,14 @@ type config struct {
 	verbose bool
 }
 
+func printHelp() {
+	fmt.Printf("zimfs - mount a ZIM file as a read-only filesystem\n\n")
+	fmt.Printf("Usage:\n")
+	fmt.Printf("  zimfs [options] <file.zim> <mountpoint>\n\n")
+	fmt.Printf("Options:\n")
+	flag.PrintDefaults()
+}
+
 func main() {
 
 	var cfg config
@@ -32,6 +40,7 @@ func main() {
 
 	// boolean to display version
 	displayVersion := flag.Bool("version", false, "Display version and exit")
+	flag.Usage = printHelp
 
 	flag.Parse()
 
@@ -60,7 +69,8 @@ func main() {
 
 	args := flag.Args()
 	if len(args) < 2 {
-		log.Fatalf("usage: zimfs <file.zim> <mountpoint>")
+		printHelp()
+		os.Exit(1)
 	}
 
 	zimPath := args[0]
