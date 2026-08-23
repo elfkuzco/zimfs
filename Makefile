@@ -51,4 +51,4 @@ build:
 .PHONY: install
 install:
 	@echo 'Installing...'
-	bo install -ldflags=${linker_flags} ./cmd/zimfs
+	go install -ldflags=${linker_flags} ./cmd/zimfs
