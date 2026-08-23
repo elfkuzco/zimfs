@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
@@ -139,18 +140,18 @@ func (ucc *UncompressedCluster) getData() (clusterData, error) {
 	// The info byte at Contents[0] plus at least one full offset must be present
 	// before we can read firstOffset.
 	if uint64(len(ucc.Contents)) < 1+uint64(offsetSize) {
-		logger.Error("cluster too small for offset table")
+		slog.Error("cluster too small for offset table")
 		return clusterData{}, CorruptData
 	}
 
 	firstOffset := ucc.readOffset(ucc.Contents[1:], offsetSize)
 	if firstOffset > maxOffsetTableSize {
-		logger.Error("offset table too large")
+		slog.Error("offset table too large")
 		return clusterData{}, CorruptData
 	}
 	nOffsets := firstOffset / uint64(offsetSize)
 	if nOffsets < 2 {
-		logger.Error("too few offsets in cluster")
+		slog.Error("too few offsets in cluster")
 		return clusterData{}, CorruptData
 	}
 	if firstOffset%uint64(offsetSize) != 0 {
@@ -160,7 +161,7 @@ func (ucc *UncompressedCluster) getData() (clusterData, error) {
 	// The full offset table must lie within Contents[1:], otherwise reading each
 	// offset below would slice past the end of the buffer.
 	if uint64(len(ucc.Contents)) < 1+nOffsets*uint64(offsetSize) {
-		logger.Error("offset table exceeds cluster size")
+		slog.Error("offset table exceeds cluster size")
 		return clusterData{}, CorruptData
 	}
 
@@ -247,12 +248,12 @@ func (cc *CompressedCluster) readOffsets() ([]uint64, io.ReadCloser, error) {
 	}
 	firstOffset := cc.readOffset(firstBuf, offsetSize)
 	if firstOffset > maxOffsetTableSize {
-		logger.Error("offset table too large")
+		slog.Error("offset table too large")
 		return nil, nil, CorruptData
 	}
 	nOffsets := firstOffset / uint64(offsetSize)
 	if nOffsets < 2 {
-		logger.Error("too few offsets in cluster")
+		slog.Error("too few offsets in cluster")
 		return nil, nil, CorruptData
 	}
 
@@ -355,7 +356,7 @@ func NewCluster(contents []byte) (ClusterReader, error) {
 			Cluster: &cluster,
 		}, nil
 	default:
-		logger.Error("no cluster registered", "compression", compression)
+		slog.Error("no cluster registered", "compression", compression)
 		return nil, UnregisteredCompression
 	}
 }

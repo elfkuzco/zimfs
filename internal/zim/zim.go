@@ -10,8 +10,6 @@ import (
 	"encoding/binary"
 )
 
-var logger = slog.Default()
-
 // fits reports whether the range [offset, offset+n) lies within a buffer of
 // the given length, without risking integer overflow in the offset+n sum.
 func fits(offset, n, length uint64) bool {
@@ -128,7 +126,7 @@ func (zf *ZimFile) FirstIndexInNamespace(namespace rune) (uint32, error) {
 // mmap, without copying.
 func (zf *ZimFile) getPathBytes(start uint64) ([]byte, error) {
 	if start >= zf.length {
-		logger.Error("entry does not have space for reading path data")
+		slog.Error("entry does not have space for reading path data")
 		return nil, CorruptData
 	}
 	end := start
@@ -136,7 +134,7 @@ func (zf *ZimFile) getPathBytes(start uint64) ([]byte, error) {
 		end++
 	}
 	if end == zf.length {
-		logger.Error("entry does not have space for reading path data")
+		slog.Error("entry does not have space for reading path data")
 		return nil, CorruptData
 	}
 	return zf.contents[start:end], nil
@@ -154,13 +152,13 @@ func (zf *ZimFile) getPathName(start uint64) (string, error) {
 // Get the directory entry located at index
 func (zf *ZimFile) GetZimEntryAtIndex(index uint32) (ZimEntry, error) {
 	if index >= zf.EntryCount {
-		logger.Error("index is greater than entry count", "index", index, "entryCount", zf.EntryCount)
+		slog.Error("index is greater than entry count", "index", index, "entryCount", zf.EntryCount)
 		return nil, EntryDoesNotExist
 	}
 
 	pathListEnd, ok := ptrListEnd(zf.PathPtrPos, zf.EntryCount)
 	if !ok || pathListEnd > zf.length {
-		logger.Error("pathList end index exceeds length of file", "end", pathListEnd, "length", zf.length)
+		slog.Error("pathList end index exceeds length of file", "end", pathListEnd, "length", zf.length)
 		return nil, CorruptData
 	}
 	pathList := zf.contents[zf.PathPtrPos:pathListEnd]
@@ -168,7 +166,7 @@ func (zf *ZimFile) GetZimEntryAtIndex(index uint32) (ZimEntry, error) {
 	offset := readUint64(pathList, uint64(index)*8)
 
 	if !fits(offset, 2, zf.length) {
-		logger.Error("entry does not have space for reading mimetype information")
+		slog.Error("entry does not have space for reading mimetype information")
 		return nil, CorruptData
 	}
 	mimeType := readUint16(zf.contents, offset)
@@ -177,7 +175,7 @@ func (zf *ZimFile) GetZimEntryAtIndex(index uint32) (ZimEntry, error) {
 		// Redirect entry header: mimeType(2) + paramLen(1) + ns(1) +
 		// revision(4) + redirectIndex(4) = 12 bytes.
 		if !fits(offset, 12, zf.length) {
-			logger.Error("entry does not have space for reading contents")
+			slog.Error("entry does not have space for reading contents")
 			return nil, CorruptData
 		}
 		path, err := zf.getPathName(offset + 12)
@@ -197,7 +195,7 @@ func (zf *ZimFile) GetZimEntryAtIndex(index uint32) (ZimEntry, error) {
 	// Content, deleted, and link-target entries share a 16-byte header with the
 	// url at offset 16. Only content entries carry cluster/blob fields.
 	if !fits(offset, 16, zf.length) {
-		logger.Error("entry does not have space for reading contents")
+		slog.Error("entry does not have space for reading contents")
 		return nil, CorruptData
 	}
 	path, err := zf.getPathName(offset + 16)
@@ -291,7 +289,7 @@ func (zf *ZimFile) GetZimEntryFromStart(start uint32, namespace rune, path strin
 	entry := dirent.Get()
 	if IsDeletedEntry(entry.MimeType) || IsLinkTargetEntry(entry.MimeType) {
 		// Deprecated entries are hidden from lookup.
-		logger.Warn("skipping deleted/link target entries in zim")
+		slog.Warn("skipping deleted/link target entries in zim")
 		return nil, EntryDoesNotExist
 	}
 	if entry.Equal(&target) {
@@ -311,7 +309,7 @@ func (zf *ZimFile) GetOrCreateCluster(entry *ContentEntry) (ClusterReader, error
 	defer zf.mu.Unlock()
 
 	if entry.ClusterNumber >= zf.ClusterCount {
-		logger.Error("cluster number is greater than total number of clusters",
+		slog.Error("cluster number is greater than total number of clusters",
 			"clusterNumber", entry.ClusterNumber, "clusterCount", zf.ClusterCount,
 		)
 		return nil, CorruptData
@@ -323,7 +321,7 @@ func (zf *ZimFile) GetOrCreateCluster(entry *ContentEntry) (ClusterReader, error
 
 	clusterListEnd, ok := ptrListEnd(zf.ClusterPtrPos, zf.ClusterCount)
 	if !ok || clusterListEnd > zf.length {
-		logger.Error("clusterList end index exceeds length of file", "end",
+		slog.Error("clusterList end index exceeds length of file", "end",
 			clusterListEnd, "length", zf.length,
 		)
 		return nil, CorruptData
@@ -335,7 +333,7 @@ func (zf *ZimFile) GetOrCreateCluster(entry *ContentEntry) (ClusterReader, error
 		return nil, CorruptData
 	}
 
-	logger.Debug("creating new cluster", "clusterNumber", entry.ClusterNumber,
+	slog.Debug("creating new cluster", "clusterNumber", entry.ClusterNumber,
 		"start", start,
 	)
 
@@ -365,7 +363,7 @@ func (zf *ZimFile) Read(entry ZimEntry, offset int64, dst []byte) (int, error) {
 	case *RedirectEntry:
 		redirect, err := zf.GetZimEntryAtIndex(entry.RedirectIndex)
 		if err != nil {
-			logger.Error("could not find entry from redirect index",
+			slog.Error("could not find entry from redirect index",
 				"redirectIndex", entry.RedirectIndex,
 			)
 			return 0, err
@@ -382,7 +380,7 @@ func (zf *ZimFile) Read(entry ZimEntry, offset int64, dst []byte) (int, error) {
 
 begin:
 	cluster, err = zf.GetOrCreateCluster(contentEntry)
-	logger.Debug("reading contents from cluster", "compression", cluster.GetCompression())
+	slog.Debug("reading contents from cluster", "compression", cluster.GetCompression())
 	if err != nil {
 		return 0, err
 	}

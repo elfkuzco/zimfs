@@ -17,8 +17,6 @@ import (
 	"github.com/jacobsa/fuse/fuseutil"
 )
 
-var logger = slog.Default()
-
 type ZimFS struct {
 	fuseutil.NotImplementedFileSystem
 	zf    *zim.ZimFile
@@ -51,7 +49,7 @@ func NewZimFS(data []byte) (fuse.Server, error) {
 	// is not necessarily index 0 if other namespaces sort before it.
 	startIndex, err := zf.FirstIndexInNamespace('C')
 	if err != nil {
-		logger.Error("could not find any entries in C namesapce")
+		slog.Error("could not find any entries in C namesapce")
 		return nil, err
 	}
 
@@ -61,7 +59,7 @@ func NewZimFS(data []byte) (fuse.Server, error) {
 	rootInode.materialized = true
 	rootInode.parent = fuseops.RootInodeID
 	fs.cache.addInode(rootInode)
-	logger.Debug("added root entry to cache", "inodeId", rootInode.id)
+	slog.Debug("added root entry to cache", "inodeId", rootInode.id)
 
 	server := fuseutil.NewFileSystemServer(fs)
 	return server, nil
@@ -88,7 +86,7 @@ func (fs *ZimFS) materializeInode(id fuseops.InodeID) (fuseops.InodeAttributes, 
 		return fs.createInodeAttributes(inode.entry)
 	})
 	if !matrerlized {
-		logger.Debug("could not materialize attributes for missing inode", "inodeId", id)
+		slog.Debug("could not materialize attributes for missing inode", "inodeId", id)
 	}
 	return attrs, matrerlized
 }
@@ -139,19 +137,19 @@ func (fs *ZimFS) createInodeAttributes(zimEntry zim.ZimEntry) fuseops.InodeAttri
 		attrs.Nlink = 1
 		cluster, err := fs.zf.GetOrCreateCluster(entry)
 		if err != nil {
-			logger.Error("unable to get cluster for entry", "path", entry.Path, "error", err)
+			slog.Error("unable to get cluster for entry", "path", entry.Path, "error", err)
 			return attrs
 		}
 		size, err := cluster.GetBlobSize(entry.BlobNumber)
 		if err != nil {
-			logger.Error("unable to retrieve size for entry from cluster", "path", entry.Path, "error", err)
+			slog.Error("unable to retrieve size for entry from cluster", "path", entry.Path, "error", err)
 		}
 		attrs.Size = size
 	case *zim.RedirectEntry:
 		attrs.Nlink = 1
 		target, err := fs.zf.ResolveRedirect(entry)
 		if err != nil {
-			logger.Error("unable to resolve redirect for entry", "path", entry.Path, "error", err)
+			slog.Error("unable to resolve redirect for entry", "path", entry.Path, "error", err)
 			return attrs
 		}
 		attrs.Size = uint64(len(target.Get().Path))
@@ -174,7 +172,7 @@ func (fs *ZimFS) LookUpInode(ctx context.Context, op *fuseops.LookUpInodeOp) err
 	}
 	parentEntry, ok := parent.entry.(*zim.DirectoryEntry)
 	if !ok {
-		logger.Error("parent entry is not a directory entry", "parent", op.Parent, "name", op.Name)
+		slog.Error("parent entry is not a directory entry", "parent", op.Parent, "name", op.Name)
 		return fuse.EINVAL
 	}
 
@@ -235,7 +233,7 @@ func (fs *ZimFS) OpenDir(ctx context.Context, op *fuseops.OpenDirOp) error {
 	}
 
 	if !node.entry.Get().IsDirectoryEntry() {
-		logger.Error("inode is not a directory", "inode", op.Inode, "path", node.entry.Get().Path)
+		slog.Error("inode is not a directory", "inode", op.Inode, "path", node.entry.Get().Path)
 		return fuse.EINVAL
 	}
 
@@ -259,7 +257,7 @@ func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
 	}
 
 	if !node.entry.Get().IsDirectoryEntry() {
-		logger.Error("inode is not a directory", "inode", op.Inode, "path", node.entry.Get().Path)
+		slog.Error("inode is not a directory", "inode", op.Inode, "path", node.entry.Get().Path)
 		return fuse.EINVAL
 	}
 
@@ -290,7 +288,7 @@ func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
 	}
 
 	startIndex := dirent.Number + (cursor - 2)
-	logger.Debug("reading directory entries", "directory", dirent.Path, "offset", op.Offset)
+	slog.Debug("reading directory entries", "directory", dirent.Path, "offset", op.Offset)
 
 	for {
 		child, nextIndex, found, err := fs.zf.NextChild(dirent, startIndex)
@@ -298,7 +296,7 @@ func (fs *ZimFS) ReadDir(ctx context.Context, op *fuseops.ReadDirOp) error {
 			return fs.mapError(err)
 		}
 		if !found {
-			logger.Debug("reached end of directory")
+			slog.Debug("reached end of directory")
 			break
 		}
 
@@ -341,7 +339,7 @@ func (fs *ZimFS) OpenFile(ctx context.Context, op *fuseops.OpenFileOp) error {
 		return fuse.ENOENT
 	}
 	if node.entry.Get().IsDirectoryEntry() {
-		logger.Error("inode is not a directory", "inode", op.Inode, "path", node.entry.Get().Path)
+		slog.Error("inode is not a directory", "inode", op.Inode, "path", node.entry.Get().Path)
 		return syscall.EINVAL
 	}
 	return nil
@@ -392,7 +390,7 @@ func (fs *ZimFS) ReadSymlink(ctx context.Context, op *fuseops.ReadSymlinkOp) err
 	}
 
 	if !node.entry.Get().IsRedirectEntry() {
-		logger.Error("inode is not a directory", "inode", op.Inode, "path", node.entry.Get().Path)
+		slog.Error("inode is not a directory", "inode", op.Inode, "path", node.entry.Get().Path)
 		return syscall.EINVAL
 	}
 	redirect := node.entry.(*zim.RedirectEntry)
