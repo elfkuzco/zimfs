@@ -1,0 +1,105 @@
+version: 1
+
+project:
+  name: zimfs
+
+toolchains:
+  go:
+    version: 1.26.6
+
+tools:
+  make: '*'
+
+tasks:
+  build:
+    description: Build the zimfs binary
+    command:
+      exe: go
+      args:
+      - build
+      - ./...
+    safe_for_agent: true
+
+  test:
+    description: Run the default automated test command
+    command:
+      exe: go
+      args:
+      - test
+      - -shuffle=on
+      - ./...
+    safe_for_agent: true
+
+  test-race:
+    description: Run automated tests with data race detector
+    command:
+      exe: go
+      args:
+      - test
+      - -race
+      - ./...
+    safe_for_agent: true
+
+  vet:
+    description: Run go vet on all packages
+    command:
+      exe: go
+      args:
+      - vet
+      - ./...
+    safe_for_agent: true
+
+  fmt-check:
+    description: Check Go code formatting
+    command:
+      exe: gofmt
+      args:
+      - -l
+      - cmd
+      - internal
+    safe_for_agent: true
+
+  audit:
+    description: Run full quality control audit
+    command:
+      exe: make
+      args:
+      - audit
+    safe_for_agent: true
+
+agent:
+  posture: readiness_strict
+  default_task: test
+  safe_tasks:
+  - test
+  - test-race
+  - build
+  - vet
+  - fmt-check
+  - audit
+  verify_after_changes:
+  - test
+  writable_paths:
+  - cmd
+  - internal
+  protected_paths:
+  - .github/workflows
+  - go.mod
+  - go.sum
+  - ota.yaml
+  inferred_boundary:
+    reviewed: true
+    provenance:
+      writable_paths:
+      - detect:common_source_roots
+      - detect:stack_source_scan
+      protected_paths:
+      - detect:ci_topology_default
+      - detect:contract_file_default
+      - detect:detected_control_files
+      - detect:stack_companion_control_files
+  bootstrap:
+    ota:
+      source:
+        kind: version
+        version: v1.6.25

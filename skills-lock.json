@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "ota": {
+      "source": "ota-run/skills",
+      "sourceType": "github",
+      "skillPath": "skills/ota/SKILL.md",
+      "computedHash": "01b7ae4deec442607cdc60e888611b748b5a64f06f0429b1547b23d9a3f20eb0"
+    }
+  }
+}
