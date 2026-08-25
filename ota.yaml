@@ -102,4 +102,4 @@ agent:
     ota:
       source:
         kind: version
-        version: v1.6.25
+        version: v1.6.26
