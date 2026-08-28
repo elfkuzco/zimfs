@@ -59,8 +59,8 @@ zimfs wikipedia_fr_all_maxi.zim /mnt/wiki
   specificiation of the [ZIM file format](https://wiki.openzim.org/wiki/ZIM_file_format).
   As a consequence, you might be able to read partially correct ZIMs. To ensure your ZIM
   file is valid, run [zimcheck](https://github.com/openzim/zim-tools) against it.
-- **Refuses to run as root**: the filesystem does no access checking of its
-  own, so running as root would be a security hole.
+- **Refuses to run as root by default**: the filesystem does no access checking of its
+  own, so running as root would be a security hole (override with `--allow-root` if needed).
 
 ## Limitations
 
