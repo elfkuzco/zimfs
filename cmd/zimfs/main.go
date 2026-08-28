@@ -26,6 +26,7 @@ var (
 type config struct {
 	verbose    bool
 	foreground bool
+	allowRoot  bool
 }
 
 func printHelp() {
@@ -63,6 +64,7 @@ func main() {
 	var logLevel = new(slog.LevelVar)
 	flag.BoolVar(&cfg.verbose, "verbose", false, "Enable verbose logging")
 	flag.BoolVar(&cfg.foreground, "foreground", false, "Run in foreground")
+	flag.BoolVar(&cfg.allowRoot, "allow-root", false, "Allow running as root (use with caution)")
 
 	// boolean to display version
 	displayVersion := flag.Bool("version", false, "Display version and exit")
@@ -88,9 +90,9 @@ func main() {
 	slog.SetDefault(logger)
 
 	// zimfs does not do its own access checking, so running as root would open
-	// security holes. Refuse to mount as root.
-	if (os.Getuid() == 0) || (os.Geteuid() == 0) {
-		log.Fatal("running zimfs as root opens unacceptable security holes")
+	// security holes. Refuse to mount as root unless explicitly opted in.
+	if (os.Getuid() == 0 || os.Geteuid() == 0) && !cfg.allowRoot {
+		log.Fatal("running zimfs as root opens unacceptable security holes (use --allow-root to override)")
 	}
 
 	args := flag.Args()
